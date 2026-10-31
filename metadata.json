@@ -1,0 +1,6 @@
+{
+  "name": "Grand Trunk NH-44: 3D Heavy Truck Simulator",
+  "description": "A photorealistic 3D heavy-duty articulated truck driving simulator set along North India's NH-44 Grand Trunk highway corridor with realistic 12-speed physics, right-hand-drive cabin interior, left-hand traffic, and dynamic lighting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
