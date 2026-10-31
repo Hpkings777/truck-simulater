@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { HighwayTextureSet } from './materialsAndTextures';
+import { applyUltraFlakeShaderToPaint, HighwayTextureSet } from './materialsAndTextures';
 import { TruckPhysicsState } from '../physics/vehiclePhysics';
 import { TrafficArchetype } from '../physics/trafficSimulation';
 
@@ -24,6 +24,9 @@ export interface PlayerRigMeshes {
   mirrorCameraAnchor: THREE.Object3D;
   rightMirrorMesh: THREE.Mesh;
   leftMirrorMesh: THREE.Mesh;
+  coolingFanGroup: THREE.Group;
+  exhaustPuffs: THREE.Mesh[];
+  cabPaintMat: THREE.MeshPhysicalMaterial;
 }
 
 /**
@@ -104,8 +107,8 @@ function createSideProfileGeometry(
 }
 
 /**
- * Creates a high-detail commercial truck wheel using LatheGeometry for contoured tire sidewalls,
- * deep-dish ventilated steel rim, planetary axle hub reduction cap, and 10 chrome lug bolts.
+ * Creates a high-detail commercial truck wheel using bulged radial sidewalls,
+ * deep-dish ventilated steel rim, planetary axle hub reduction cap, and chrome lug bolts.
  */
 function createHeavyWheelGroup(
   tireMat: THREE.Material,
@@ -122,13 +125,11 @@ function createHeavyWheelGroup(
     const unit = new THREE.Group();
     unit.position.x = offsetX;
 
-    // Contoured radial tire with bulged sidewall
     const tireGeo = new THREE.CylinderGeometry(outerRadius, outerRadius, 0.29, 28, 1);
     tireGeo.rotateZ(Math.PI / 2);
     const tireMesh = new THREE.Mesh(tireGeo, tireMat);
     unit.add(tireMesh);
 
-    // Sidewall torus bulges on left & right faces of tire
     const bulgeGeo = new THREE.TorusGeometry(0.42, 0.115, 12, 28);
     bulgeGeo.rotateY(Math.PI / 2);
     const leftBulge = new THREE.Mesh(bulgeGeo, tireMat);
@@ -138,7 +139,6 @@ function createHeavyWheelGroup(
     rightBulge.position.x = 0.055;
     unit.add(rightBulge);
 
-    // Deep-dish steel wheel rim
     const rimGeo = new THREE.CylinderGeometry(rimRadius, rimRadius * 0.88, 0.31, 24);
     rimGeo.rotateZ(Math.PI / 2);
     const rimMesh = new THREE.Mesh(rimGeo, rimMat);
@@ -154,7 +154,6 @@ function createHeavyWheelGroup(
     wheelGroup.add(buildSingleTireAndRim(0));
   }
 
-  // Heavy Cast-Iron Planetary Hub Cap & 10 Chrome Lug Studs
   const hubWidth = isDualRear ? 0.68 : 0.36;
   const hubGeo = new THREE.CylinderGeometry(0.15, 0.17, hubWidth, 16);
   hubGeo.rotateZ(Math.PI / 2);
@@ -210,10 +209,9 @@ function createCoiledSuzieHose(
   return new THREE.Mesh(tubeGeo, mat);
 }
 
-/**
- * Builds a soft radial contact shadow texture so vehicles sit grounded on the asphalt.
- */
-function createContactShadowMaterial(): THREE.MeshBasicMaterial {
+let _sharedContactShadowMat: THREE.MeshBasicMaterial | null = null;
+function getSharedContactShadowMaterial(): THREE.MeshBasicMaterial {
+  if (_sharedContactShadowMat) return _sharedContactShadowMat;
   const c = document.createElement('canvas');
   c.width = 128;
   c.height = 256;
@@ -226,7 +224,7 @@ function createContactShadowMaterial(): THREE.MeshBasicMaterial {
   ctx.fillRect(0, 0, 128, 256);
 
   const tex = new THREE.CanvasTexture(c);
-  return new THREE.MeshBasicMaterial({
+  _sharedContactShadowMat = new THREE.MeshBasicMaterial({
     map: tex,
     transparent: true,
     depthWrite: false,
@@ -234,6 +232,7 @@ function createContactShadowMaterial(): THREE.MeshBasicMaterial {
     polygonOffsetFactor: -1,
     polygonOffsetUnits: -1,
   });
+  return _sharedContactShadowMat;
 }
 
 /**
@@ -249,7 +248,7 @@ export function buildPlayerTruckAndTrailer(
   const cabinSuspensionGroup = new THREE.Group();
   tractorRoot.add(cabinSuspensionGroup);
 
-  // Calibrated PBR Materials
+  // Calibrated PBR Materials with Custom GLSL Metallic Flake Clearcoat Shader
   const cabPaintMat = new THREE.MeshPhysicalMaterial({
     color: 0xb9380b, // Deep Metallic Saffron Crimson
     metalness: 0.68,
@@ -257,6 +256,10 @@ export function buildPlayerTruckAndTrailer(
     clearcoat: isSoftwareGl ? 0 : 1.0,
     clearcoatRoughness: 0.1,
   });
+  if (!isSoftwareGl) {
+    applyUltraFlakeShaderToPaint(cabPaintMat);
+  }
+
   const cabSecondaryPaintMat = new THREE.MeshPhysicalMaterial({
     color: 0x18181b, // Satin Obsidian Cladding
     metalness: 0.35,
@@ -323,7 +326,7 @@ export function buildPlayerTruckAndTrailer(
     roughness: 0.78,
   });
 
-  // Emissive Lamp Materials
+  // Emissive Lamp Materials (calibrated so only active lamps exceed the Ultra HDR bloom threshold of 1.55)
   const headlightLensMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     emissive: 0xfffbeb,
@@ -350,7 +353,7 @@ export function buildPlayerTruckAndTrailer(
   });
 
   // Contact shadow beneath Tractor
-  const contactShadowMat = createContactShadowMaterial();
+  const contactShadowMat = getSharedContactShadowMaterial();
   const tractorShadow = new THREE.Mesh(new THREE.PlaneGeometry(3.3, 7.8), contactShadowMat);
   tractorShadow.rotation.x = -Math.PI / 2;
   tractorShadow.position.set(0, 0.02, 0.2);
@@ -368,7 +371,6 @@ export function buildPlayerTruckAndTrailer(
     tractorRoot.add(rail);
   }
 
-  // Chassis Crossmembers & Heavy Tandem Axle Housings + Driveshaft
   for (const cz of [-1.85, -0.4, 1.15, 2.48, 3.35]) {
     const cross = new THREE.Mesh(new THREE.BoxGeometry(1.08, 0.22, 0.18), chassisSteelMat);
     cross.position.set(0, 0.72, cz);
@@ -383,14 +385,22 @@ export function buildPlayerTruckAndTrailer(
     tractorRoot.add(axleTube);
 
     if (az > 0) {
-      // Rear differential pumpkin housing
       const diff = new THREE.Mesh(new THREE.SphereGeometry(0.24, 14, 12), chassisSteelMat);
       diff.position.set(0, 0.54, az);
       tractorRoot.add(diff);
+
+      // Pneumatic spring-brake chambers mounted on rear drive axles
+      for (const side of [-1, 1]) {
+        const brakeChamber = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.085, 0.085, 0.18, 10).rotateX(Math.PI / 2),
+          matteBumperMat
+        );
+        brakeChamber.position.set(side * 0.42, 0.65, az - 0.18);
+        tractorRoot.add(brakeChamber);
+      }
     }
   }
 
-  // Perforated Brushed Aluminum Catwalk Deck & Step Plates
   const catwalk = new THREE.Mesh(
     createRoundedBoxGeometry(1.26, 0.06, 2.55, 0.02, 2),
     brushedAlumMat
@@ -398,7 +408,6 @@ export function buildPlayerTruckAndTrailer(
   catwalk.position.set(0, 0.89, 0.75);
   tractorRoot.add(catwalk);
 
-  // Left Polished Aluminum 400L Cylindrical Diesel Tank with Chrome Securing Straps
   const fuelTankGeo = new THREE.CylinderGeometry(0.35, 0.35, 1.72, 24);
   fuelTankGeo.rotateX(Math.PI / 2);
   const fuelTank = new THREE.Mesh(fuelTankGeo, brushedAlumMat);
@@ -414,7 +423,6 @@ export function buildPlayerTruckAndTrailer(
     tractorRoot.add(strap);
   }
 
-  // Right AdBlue Tank (Blue Cap), Dual Air Brake Cylinders & Battery Box
   const batteryBox = new THREE.Mesh(
     createRoundedBoxGeometry(0.62, 0.54, 0.95, 0.05, 3),
     matteBumperMat
@@ -429,7 +437,6 @@ export function buildPlayerTruckAndTrailer(
   adBlueTank.position.set(0.9, 0.68, 0.36);
   tractorRoot.add(adBlueTank);
 
-  // Fifth-Wheel Hitch Horseshoe Plate & Locking Jaws (at z = +1.9m)
   const fifthWheelBase = new THREE.Mesh(
     new THREE.BoxGeometry(1.18, 0.12, 0.95),
     chassisSteelMat
@@ -444,7 +451,14 @@ export function buildPlayerTruckAndTrailer(
   fifthWheelPlate.position.set(0, 1.01, 1.9);
   tractorRoot.add(fifthWheelPlate);
 
-  // Contoured Rear Tandem Quarter-Fenders & Mudflaps
+  // Fifth-wheel kingpin release pull-handle
+  const releaseRod = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.012, 0.012, 0.55, 8).rotateZ(Math.PI / 2),
+    chromeMat
+  );
+  releaseRod.position.set(-0.56, 0.98, 1.9);
+  tractorRoot.add(releaseRod);
+
   for (const side of [-1, 1]) {
     const fenderArch = new THREE.Mesh(
       createRoundedBoxGeometry(0.68, 0.14, 2.85, 0.05, 3),
@@ -468,7 +482,6 @@ export function buildPlayerTruckAndTrailer(
     tractorRoot.add(reflectorStrip);
   }
 
-  // Coiled Red (Emergency) & Yellow (Service) Pneumatic Suzie Hoses behind Cab
   const redSuzie = createCoiledSuzieHose(
     new THREE.Vector3(-0.22, 1.55, -0.35),
     new THREE.Vector3(-0.18, 1.42, 1.25),
@@ -485,7 +498,6 @@ export function buildPlayerTruckAndTrailer(
   // ============================================================================
   // 2. Sculpted Aerodynamic Sleeper Cabin Exterior (`cabinSuspensionGroup`)
   // ============================================================================
-  // Lower Sculpted Cab Nose & Recessed Interior Firewall so the exterior cab body never intersects the interior dashboard or gauges!
   const lowerCabProfile: [number, number][] = [
     [-2.7, 0.88],
     [-2.74, 1.38],
@@ -501,7 +513,6 @@ export function buildPlayerTruckAndTrailer(
   lowerCab.receiveShadow = !isSoftwareGl;
   cabinSuspensionGroup.add(lowerCab);
 
-  // Left & Right Exterior Painted Door Skins (up to window beltline y = 1.88m)
   for (const side of [-1, 1]) {
     const doorPanel = new THREE.Mesh(
       createRoundedBoxGeometry(0.11, 0.42, 1.98, 0.03, 3),
@@ -511,7 +522,6 @@ export function buildPlayerTruckAndTrailer(
     cabinSuspensionGroup.add(doorPanel);
   }
 
-  // Flared Wheel Arch Lip, Upper Door Roof Header Rails & Three-Tiered Entry Steps
   for (const side of [-1, 1]) {
     const wheelArch = new THREE.Mesh(
       createRoundedBoxGeometry(0.14, 0.24, 1.24, 0.04, 3),
@@ -520,7 +530,6 @@ export function buildPlayerTruckAndTrailer(
     wheelArch.position.set(side * 1.22, 0.82, -1.85);
     cabinSuspensionGroup.add(wheelArch);
 
-    // Painted upper door header beam connecting A-pillar to sleeper wall above side window
     const doorHeader = new THREE.Mesh(
       createRoundedBoxGeometry(0.12, 0.16, 1.48, 0.03, 2),
       cabPaintMat
@@ -528,7 +537,6 @@ export function buildPlayerTruckAndTrailer(
     doorHeader.position.set(side * 1.17, 2.98, -1.85);
     cabinSuspensionGroup.add(doorHeader);
 
-    // 3 Perforated Cab Footsteps below door
     for (let st = 0; st < 3; st++) {
       const step = new THREE.Mesh(
         new THREE.BoxGeometry(0.16, 0.04, 0.56),
@@ -538,7 +546,6 @@ export function buildPlayerTruckAndTrailer(
       cabinSuspensionGroup.add(step);
     }
 
-    // Exterior Chrome Door Handle & Side Marker Repeaters
     const handle = new THREE.Mesh(
       createRoundedBoxGeometry(0.06, 0.05, 0.22, 0.015, 2),
       chromeMat
@@ -547,7 +554,6 @@ export function buildPlayerTruckAndTrailer(
     cabinSuspensionGroup.add(handle);
   }
 
-  // Saffron-Gold & Brushed Chrome Livery Beltline Stripes
   const waistStripeGold = new THREE.Mesh(
     createRoundedBoxGeometry(2.51, 0.11, 2.28, 0.03, 2),
     cabTrimGoldMat
@@ -562,7 +568,6 @@ export function buildPlayerTruckAndTrailer(
   waistStripeChrome.position.set(0, 1.28, -1.56);
   cabinSuspensionGroup.add(waistStripeChrome);
 
-  // Rear Sleeper Compartment Section (z = -1.12m to -0.42m, full height to y = 3.12m)
   const sleeperProfile: [number, number][] = [
     [-1.12, 1.85],
     [-1.12, 3.08],
@@ -576,7 +581,14 @@ export function buildPlayerTruckAndTrailer(
   rearSleeperMesh.castShadow = !isSoftwareGl;
   cabinSuspensionGroup.add(rearSleeperMesh);
 
-  // Sculpted High-Roof Aerodynamic Fairing & Wind Deflector
+  // Rear cab window & protective steel bars on back of sleeper cab
+  const rearCabWindow = new THREE.Mesh(
+    createRoundedBoxGeometry(1.15, 0.45, 0.06, 0.02, 2),
+    cabSecondaryPaintMat
+  );
+  rearCabWindow.position.set(0, 2.48, -0.4);
+  cabinSuspensionGroup.add(rearCabWindow);
+
   const roofProfile: [number, number][] = [
     [-2.58, 2.98],
     [-2.25, 3.36],
@@ -592,7 +604,6 @@ export function buildPlayerTruckAndTrailer(
   roofFairingMesh.castShadow = !isSoftwareGl;
   cabinSuspensionGroup.add(roofFairingMesh);
 
-  // Gold Graphic Accent on Roof Fairing
   const roofStripe = new THREE.Mesh(
     createRoundedBoxGeometry(2.44, 0.12, 1.45, 0.03, 2),
     cabTrimGoldMat
@@ -601,7 +612,23 @@ export function buildPlayerTruckAndTrailer(
   roofStripe.rotation.x = 0.22;
   cabinSuspensionGroup.add(roofStripe);
 
-  // Raked Front A-Pillars & Door Window Frames
+  // Twin Roof-Mounted Amber Heavy Haulage Beacon Strobe Domes
+  for (const side of [-1, 1]) {
+    const beaconBase = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.06, 0.075, 0.05, 12),
+      chromeMat
+    );
+    beaconBase.position.set(side * 0.95, 3.82, -0.58);
+    cabinSuspensionGroup.add(beaconBase);
+
+    const beaconDome = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.048, 0.058, 0.11, 12),
+      new THREE.MeshBasicMaterial({ color: 0xf59e0b })
+    );
+    beaconDome.position.set(side * 0.95, 3.88, -0.58);
+    cabinSuspensionGroup.add(beaconDome);
+  }
+
   const pillarGeo = createRoundedBoxGeometry(0.12, 1.18, 0.14, 0.03, 2);
   for (const side of [-1, 1]) {
     const aPillar = new THREE.Mesh(pillarGeo, cabPaintMat);
@@ -614,7 +641,6 @@ export function buildPlayerTruckAndTrailer(
     cabinSuspensionGroup.add(bPillar);
   }
 
-  // Front Panoramic Windshield Glass & Dual Windshield Wipers
   const windshield = new THREE.Mesh(new THREE.PlaneGeometry(2.26, 1.08), glassMat);
   windshield.position.set(0, 2.45, -2.66);
   windshield.rotation.x = Math.PI + 0.15;
@@ -631,7 +657,6 @@ export function buildPlayerTruckAndTrailer(
     cabinSuspensionGroup.add(wiperArm);
   }
 
-  // Exterior Aerodynamic Sun Visor with Chrome Trim & 5 Amber Marker LEDs
   const sunVisor = new THREE.Mesh(
     createRoundedBoxGeometry(2.46, 0.22, 0.32, 0.04, 3),
     cabSecondaryPaintMat
@@ -655,7 +680,6 @@ export function buildPlayerTruckAndTrailer(
     cabinSuspensionGroup.add(markerLed);
   }
 
-  // Twin Chrome Roof Air Horns + Twin Rear-of-Cab Air Intake Snorkels + Perforated Exhaust Stack
   const hornGeo = new THREE.CylinderGeometry(0.035, 0.085, 0.74, 16);
   hornGeo.rotateX(Math.PI / 2);
   for (const side of [-1, 1]) {
@@ -663,7 +687,6 @@ export function buildPlayerTruckAndTrailer(
     horn.position.set(side * 0.92, 3.45, -2.05);
     cabinSuspensionGroup.add(horn);
 
-    // Air Filter Canister behind Cab
     const airCanister = new THREE.Mesh(
       new THREE.CylinderGeometry(0.18, 0.18, 0.95, 16),
       cabSecondaryPaintMat
@@ -687,7 +710,23 @@ export function buildPlayerTruckAndTrailer(
   exhaustTip.rotation.x = -0.38;
   cabinSuspensionGroup.add(exhaustTip);
 
-  // Sculpted Heavy Front Bumper, Bullbar, Multi-Slat Chrome Grille & Projector Headlights
+  // Volumetric-Style Diesel Exhaust Heat/Smoke Plume Spheres above Chrome Stack
+  const exhaustPuffs: THREE.Mesh[] = [];
+  const puffGeo = new THREE.IcosahedronGeometry(0.14, 1);
+  for (let p = 0; p < 5; p++) {
+    const puffMat = new THREE.MeshBasicMaterial({
+      color: 0x334155,
+      transparent: true,
+      opacity: 0.22,
+      depthWrite: false,
+    });
+    const puff = new THREE.Mesh(puffGeo, puffMat);
+    puff.position.set(-1.14, 4.15 + p * 0.28, -0.1 + p * 0.18);
+    cabinSuspensionGroup.add(puff);
+    exhaustPuffs.push(puff);
+  }
+
+  // Sculpted Heavy Front Bumper, Bullbar, Multi-Slat Chrome Grille & Spinning Radiator Fan
   const frontBumper = new THREE.Mesh(
     createRoundedBoxGeometry(2.54, 0.52, 0.42, 0.07, 4),
     matteBumperMat
@@ -695,7 +734,6 @@ export function buildPlayerTruckAndTrailer(
   frontBumper.position.set(0, 0.72, -2.68);
   cabinSuspensionGroup.add(frontBumper);
 
-  // Heavy Tubular Chrome Highway Bullbar
   const bullbarLower = new THREE.Mesh(
     new THREE.CylinderGeometry(0.042, 0.042, 2.28, 14).rotateZ(Math.PI / 2),
     chromeMat
@@ -719,13 +757,29 @@ export function buildPlayerTruckAndTrailer(
     cabinSuspensionGroup.add(bullbarUpright);
   }
 
-  // Front Radiator Grille Surround & 6 Contoured Chrome Louvers
   const frontGrille = new THREE.Mesh(
     createRoundedBoxGeometry(1.74, 0.92, 0.12, 0.04, 3),
     cabSecondaryPaintMat
   );
   frontGrille.position.set(0, 1.42, -2.72);
   cabinSuspensionGroup.add(frontGrille);
+
+  // Animated 9-Blade Radiator Cooling Fan behind Front Grille
+  const coolingFanGroup = new THREE.Group();
+  coolingFanGroup.position.set(0, 1.38, -2.69);
+  const fanHub = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.08, 0.08, 0.05, 12).rotateX(Math.PI / 2),
+    brushedAlumMat
+  );
+  coolingFanGroup.add(fanHub);
+  const bladeGeo = new THREE.BoxGeometry(0.06, 0.34, 0.015);
+  bladeGeo.translate(0, 0.18, 0);
+  for (let b = 0; b < 9; b++) {
+    const blade = new THREE.Mesh(bladeGeo, brushedAlumMat);
+    blade.rotation.z = (b / 9) * Math.PI * 2;
+    coolingFanGroup.add(blade);
+  }
+  cabinSuspensionGroup.add(coolingFanGroup);
 
   for (let s = 0; s < 6; s++) {
     const slat = new THREE.Mesh(
@@ -736,7 +790,6 @@ export function buildPlayerTruckAndTrailer(
     cabinSuspensionGroup.add(slat);
   }
 
-  // Front Indian Commercial Yellow Number Plate ("HR 44 G 4928")
   const plateMesh = new THREE.Mesh(
     new THREE.BoxGeometry(0.52, 0.12, 0.04),
     new THREE.MeshBasicMaterial({ color: 0xfacc15 })
@@ -744,7 +797,6 @@ export function buildPlayerTruckAndTrailer(
   plateMesh.position.set(0, 0.56, -2.9);
   cabinSuspensionGroup.add(plateMesh);
 
-  // Dual-Chamber Projector Headlights + LED DRLs + Amber Turn Indicators
   for (const side of [-1, 1]) {
     const bezel = new THREE.Mesh(
       createRoundedBoxGeometry(0.44, 0.28, 0.1, 0.03, 2),
@@ -768,7 +820,6 @@ export function buildPlayerTruckAndTrailer(
     cabinSuspensionGroup.add(indMesh);
   }
 
-  // Functional Three.js Headlight SpotLights
   const headlightLeftSpot = new THREE.SpotLight(0xfffbeb, 0, 95, Math.PI / 5, 0.45, 1.35);
   headlightLeftSpot.position.set(-0.98, 0.95, -2.82);
   headlightLeftSpot.target.position.set(-1.2, 0.1, -42);
@@ -781,10 +832,8 @@ export function buildPlayerTruckAndTrailer(
   cabinSuspensionGroup.add(headlightRightSpot);
   cabinSuspensionGroup.add(headlightRightSpot.target);
 
-  // Exterior Dual-Glass Wing Mirrors (visible from inside 1st-person cabin!)
   const createWingMirrorAssembly = (side: -1 | 1): THREE.Mesh => {
     const mirrorGroup = new THREE.Group();
-    // Upper & lower tubular mounting arms
     for (const ay of [2.64, 2.12]) {
       const arm = new THREE.Mesh(
         new THREE.CylinderGeometry(0.018, 0.018, 0.36, 8).rotateZ(Math.PI / 2),
@@ -794,7 +843,6 @@ export function buildPlayerTruckAndTrailer(
       mirrorGroup.add(arm);
     }
 
-    // Pivot group for housing + flush mirror glass angled inward toward driver seat
     const headPivot = new THREE.Group();
     headPivot.position.set(side * 1.46, 2.38, -2.36);
     headPivot.rotation.y = side * -0.18;
@@ -819,7 +867,6 @@ export function buildPlayerTruckAndTrailer(
   const leftMirrorMesh = createWingMirrorAssembly(-1);
   const rightMirrorMesh = createWingMirrorAssembly(1);
 
-  // Rear-Facing Mirror Camera Anchor (mounted on right wing mirror looking back along trailer)
   const mirrorCameraAnchor = new THREE.Object3D();
   mirrorCameraAnchor.position.set(1.48, 2.38, -2.25);
   cabinSuspensionGroup.add(mirrorCameraAnchor);
@@ -827,13 +874,10 @@ export function buildPlayerTruckAndTrailer(
   // ============================================================================
   // 3. AAA First-Person Right-Hand-Drive (RHD) Cockpit Interior
   // ============================================================================
-  // Warm interior ambient fill point light so the cockpit leather, stitching, and aluminum trim
-  // are clearly illuminated both day and night
   const cabinAmbientLight = new THREE.PointLight(0xffe4b5, 0.95, 3.8, 1.2);
   cabinAmbientLight.position.set(0.18, 2.68, -1.65);
   cabinSuspensionGroup.add(cabinAmbientLight);
 
-  // Cabin Floor Mat & Engine Tunnel
   const cabinFloor = new THREE.Mesh(
     new THREE.BoxGeometry(2.36, 0.08, 2.15),
     matteBumperMat
@@ -841,7 +885,6 @@ export function buildPlayerTruckAndTrailer(
   cabinFloor.position.set(0, 1.32, -1.52);
   cabinSuspensionGroup.add(cabinFloor);
 
-  // Interior Door Cards & Armrests (Left & Right)
   for (const side of [-1, 1]) {
     const doorCard = new THREE.Mesh(
       createRoundedBoxGeometry(0.1, 0.72, 1.45, 0.03, 2),
@@ -857,7 +900,6 @@ export function buildPlayerTruckAndTrailer(
     armrest.position.set(side * 1.1, 1.76, -1.68);
     cabinSuspensionGroup.add(armrest);
 
-    // Interior A-Pillar Trim & Grab Handle
     const grabBar = new THREE.Mesh(
       new THREE.CylinderGeometry(0.016, 0.016, 0.55, 8),
       brushedAlumMat
@@ -867,7 +909,6 @@ export function buildPlayerTruckAndTrailer(
     cabinSuspensionGroup.add(grabBar);
   }
 
-  // Sculpted Wrap-Around Charcoal Leather Dashboard Deck (spanning full cabin width below windshield)
   const dashDeck = new THREE.Mesh(
     createRoundedBoxGeometry(2.32, 0.42, 0.68, 0.06, 4),
     leatherDashMat
@@ -875,7 +916,6 @@ export function buildPlayerTruckAndTrailer(
   dashDeck.position.set(0, 1.68, -2.32);
   cabinSuspensionGroup.add(dashDeck);
 
-  // Brushed Aluminum Trim Strip across Dashboard Front Edge
   const dashTrimStrip = new THREE.Mesh(
     createRoundedBoxGeometry(2.26, 0.032, 0.68, 0.01, 2),
     brushedAlumMat
@@ -883,7 +923,6 @@ export function buildPlayerTruckAndTrailer(
   dashTrimStrip.position.set(0, 1.85, -2.31);
   cabinSuspensionGroup.add(dashTrimStrip);
 
-  // Sculpted Instrument Binnacle Hood Arch over RHD Driver Cluster (x = +0.58m)
   const binnacleHood = new THREE.Mesh(
     createRoundedBoxGeometry(0.68, 0.05, 0.28, 0.02, 3),
     leatherDashMat
@@ -898,7 +937,6 @@ export function buildPlayerTruckAndTrailer(
   binnacleBack.position.set(0.58, 1.95, -2.29);
   cabinSuspensionGroup.add(binnacleBack);
 
-  // High-Resolution Backlit Instrument Cluster Plane (1024x512 live updated canvas)
   const clusterPlane = new THREE.Mesh(
     new THREE.PlaneGeometry(0.62, 0.28),
     new THREE.MeshBasicMaterial({ map: textures.dashboardClusterMap })
@@ -907,7 +945,6 @@ export function buildPlayerTruckAndTrailer(
   clusterPlane.rotation.x = -0.16;
   cabinSuspensionGroup.add(clusterPlane);
 
-  // Physical 3D Illuminated Needles (synced with RPM & KM/H)
   const needleMat = new THREE.MeshBasicMaterial({ color: 0xf97316 });
   const rpmNeedle = new THREE.Mesh(new THREE.BoxGeometry(0.007, 0.072, 0.004), needleMat);
   rpmNeedle.position.set(0.415, 1.935, -2.2);
@@ -917,10 +954,9 @@ export function buildPlayerTruckAndTrailer(
   speedNeedle.position.set(0.745, 1.935, -2.2);
   cabinSuspensionGroup.add(speedNeedle);
 
-  // Angled Center Infotainment & Telemetry Console (x = +0.02m, angled toward RHD driver)
   const centerConsolePod = new THREE.Group();
   centerConsolePod.position.set(0.02, 1.96, -2.18);
-  centerConsolePod.rotation.y = 0.26; // Angled toward right-hand driver seat
+  centerConsolePod.rotation.y = 0.26;
   centerConsolePod.rotation.x = -0.14;
 
   const consoleBezel = new THREE.Mesh(
@@ -929,7 +965,6 @@ export function buildPlayerTruckAndTrailer(
   );
   centerConsolePod.add(consoleBezel);
 
-  // Live GPS Route Navigation Display Screen!
   const gpsScreen = new THREE.Mesh(
     new THREE.PlaneGeometry(0.4, 0.26),
     new THREE.MeshBasicMaterial({ map: textures.gpsNavMap })
@@ -937,7 +972,6 @@ export function buildPlayerTruckAndTrailer(
   gpsScreen.position.set(0, 0.02, 0.062);
   centerConsolePod.add(gpsScreen);
 
-  // Illuminated Rocker Switches, Red Hazard Button & Yellow Parking Brake Valve below GPS
   for (let b = -3; b <= 3; b++) {
     const btnColor = b === 0 ? 0xef4444 : b === 3 ? 0xfacc15 : 0x38bdf8;
     const sw = new THREE.Mesh(
@@ -949,7 +983,6 @@ export function buildPlayerTruckAndTrailer(
   }
   cabinSuspensionGroup.add(centerConsolePod);
 
-  // Floor Transmission Tunnel & Booted 12-Speed Range-Splitter Shifter Stick
   const gearConsole = new THREE.Mesh(
     createRoundedBoxGeometry(0.36, 0.42, 0.62, 0.05, 3),
     leatherDashMat
@@ -979,7 +1012,6 @@ export function buildPlayerTruckAndTrailer(
   shifterKnob.position.set(0.2, 2.06, -1.58);
   cabinSuspensionGroup.add(shifterKnob);
 
-  // Overhead Windshield Console, Digital Tachograph & Sun Visor Blinds
   const overheadConsole = new THREE.Mesh(
     createRoundedBoxGeometry(2.28, 0.22, 0.46, 0.04, 3),
     cabinUpholsteryMat
@@ -995,7 +1027,6 @@ export function buildPlayerTruckAndTrailer(
   tachographDisplay.rotation.x = 0.25;
   cabinSuspensionGroup.add(tachographDisplay);
 
-  // Rotating 3-Spoke Leather Steering Wheel & Column Stalks (Right-Hand Drive at x = +0.58m)
   const steeringColumn = new THREE.Mesh(
     new THREE.CylinderGeometry(0.052, 0.065, 0.44, 14),
     leatherDashMat
@@ -1004,7 +1035,6 @@ export function buildPlayerTruckAndTrailer(
   steeringColumn.rotation.x = Math.PI / 2 - 0.42;
   cabinSuspensionGroup.add(steeringColumn);
 
-  // Indicator & Retarder Stalks on Steering Column
   for (const side of [-1, 1]) {
     const stalk = new THREE.Mesh(
       new THREE.CylinderGeometry(0.01, 0.014, 0.22, 8).rotateZ(Math.PI / 2),
@@ -1016,7 +1046,7 @@ export function buildPlayerTruckAndTrailer(
 
   const steeringWheelGroup = new THREE.Group();
   steeringWheelGroup.position.set(0.58, 1.84, -1.86);
-  steeringWheelGroup.rotation.x = -0.42; // Ergonomic truck wheel tilt leaving gauges unobstructed
+  steeringWheelGroup.rotation.x = -0.42;
 
   const wheelRim = new THREE.Mesh(
     new THREE.TorusGeometry(0.235, 0.024, 16, 36),
@@ -1024,7 +1054,6 @@ export function buildPlayerTruckAndTrailer(
   );
   steeringWheelGroup.add(wheelRim);
 
-  // Top orange centering stripe on steering wheel rim
   const topCenterRing = new THREE.Mesh(
     new THREE.TorusGeometry(0.235, 0.025, 12, 12, 0.14),
     new THREE.MeshBasicMaterial({ color: 0xf97316 })
@@ -1069,7 +1098,6 @@ export function buildPlayerTruckAndTrailer(
 
   cabinSuspensionGroup.add(steeringWheelGroup);
 
-  // High-Back Quilted Air-Suspension Seats with Bolsters (Driver & Co-Driver)
   for (const sx of [0.58, -0.58]) {
     const seatCushion = new THREE.Mesh(
       createRoundedBoxGeometry(0.56, 0.16, 0.56, 0.04, 3),
@@ -1094,7 +1122,6 @@ export function buildPlayerTruckAndTrailer(
     cabinSuspensionGroup.add(headrest);
   }
 
-  // First-Person Driver Camera Anchor (natural eye level in Right-Hand-Drive seat)
   const cabinCameraAnchor = new THREE.Object3D();
   cabinCameraAnchor.position.set(0.58, 2.34, -1.32);
   cabinSuspensionGroup.add(cabinCameraAnchor);
@@ -1163,19 +1190,18 @@ export function buildPlayerTruckAndTrailer(
   });
 
   const containerBox = new THREE.Mesh(new THREE.BoxGeometry(2.5, 2.72, 11.8), [
-    containerSideMat, // +X Right
-    containerSideMat, // -X Left
-    containerEndMat, // +Y Top
-    chassisSteelMat, // -Y Bottom
-    containerRearDoorMat, // +Z Rear Doors
-    containerEndMat, // -Z Front Bulkhead
+    containerSideMat,
+    containerSideMat,
+    containerEndMat,
+    chassisSteelMat,
+    containerRearDoorMat,
+    containerEndMat,
   ]);
   containerBox.position.set(0, 2.58, 0);
   containerBox.castShadow = !isSoftwareGl;
   containerBox.receiveShadow = !isSoftwareGl;
   trailerRoot.add(containerBox);
 
-  // ISO Corner Castings (8 reinforced corner blocks on the 40ft container)
   const cornerGeo = new THREE.BoxGeometry(0.18, 0.18, 0.18);
   for (const cx of [-1.2, 1.2]) {
     for (const cy of [1.28, 3.88]) {
@@ -1187,7 +1213,6 @@ export function buildPlayerTruckAndTrailer(
     }
   }
 
-  // Trailer Gooseneck I-Beam Chassis Frame, Twist-Lock Outriggers & Telescopic Landing Gear
   const trailerChassis = new THREE.Mesh(
     createRoundedBoxGeometry(1.88, 0.34, 11.65, 0.04, 2),
     chassisSteelMat
@@ -1204,14 +1229,12 @@ export function buildPlayerTruckAndTrailer(
     trailerRoot.add(foot);
   }
 
-  // Twin Aluminum Cyclist Side Underrun Protection Rails + Spare Wheel Carrier
   for (const side of [-1, 1]) {
     for (const ry of [0.62, 0.84]) {
       const bar = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.1, 4.8), brushedAlumMat);
       bar.position.set(side * 1.18, ry, -0.15);
       trailerRoot.add(bar);
     }
-    // Amber LED Side Marker Lights along Trailer Chassis
     for (const mz of [-4.8, -1.6, 1.6, 4.8]) {
       const sideLed = new THREE.Mesh(
         new THREE.BoxGeometry(0.04, 0.06, 0.14),
@@ -1222,13 +1245,11 @@ export function buildPlayerTruckAndTrailer(
     }
   }
 
-  // Spare Tire mounted beneath Trailer Belly
   const spareTire = createHeavyWheelGroup(tireRubberMat, steelRimMat, chromeMat, chassisSteelMat, false);
   spareTire.rotation.z = Math.PI / 2;
   spareTire.position.set(0, 0.58, -0.65);
   trailerRoot.add(spareTire);
 
-  // Rear Container Door Chrome Locking Rods, Latch Handles & Underrun Bumper
   for (const rx of [-0.68, -0.24, 0.24, 0.68]) {
     const lockRod = new THREE.Mesh(
       new THREE.CylinderGeometry(0.022, 0.022, 2.62, 10),
@@ -1245,7 +1266,6 @@ export function buildPlayerTruckAndTrailer(
   trailerRearBumper.position.set(0, 0.66, 5.88);
   trailerRoot.add(trailerRearBumper);
 
-  // Trailer Multi-Chamber Rear Brake Lamps & Turn Indicators
   for (const side of [-1, 1]) {
     const brakeLamp = new THREE.Mesh(
       createRoundedBoxGeometry(0.42, 0.15, 0.06, 0.02, 2),
@@ -1262,7 +1282,6 @@ export function buildPlayerTruckAndTrailer(
     trailerRoot.add(rearInd);
   }
 
-  // Tri-Axle 6-Wheel Dual-Tire Trailer Bogie with Continuous Arch Fender
   const trailerWheelMeshes: THREE.Group[] = [];
   const trailerAxleZs = [2.2, 3.45, 4.7];
   for (const side of [-1, 1]) {
@@ -1306,12 +1325,15 @@ export function buildPlayerTruckAndTrailer(
     mirrorCameraAnchor,
     rightMirrorMesh,
     leftMirrorMesh,
+    coolingFanGroup,
+    exhaustPuffs,
+    cabPaintMat,
   };
 }
 
 /**
  * Synchronizes the 3D Tractor, Cabin Suspension, Steering Wheel, Instrument Dials, Lights,
- * and Articulated Trailer meshes with the current `TruckPhysicsState`.
+ * Spinning Cooling Fan, Exhaust Smoke Plume, and Articulated Trailer meshes with `TruckPhysicsState`.
  */
 export function syncPlayerRigMeshes(
   meshes: PlayerRigMeshes,
@@ -1334,6 +1356,25 @@ export function syncPlayerRigMeshes(
     w.rotation.x = -state.wheelRotationRad;
   }
 
+  // Spin the 9-blade radiator cooling fan behind the front grille proportional to engine RPM
+  meshes.coolingFanGroup.rotation.z -= (state.rpm / 600) * 0.18;
+
+  // Animate diesel exhaust puffs rising from the chrome stack
+  const loadFactor = Math.max(0.2, Math.min(1.0, (state.rpm - 600) / 1600));
+  const phase = performance.now() * 0.0032;
+  for (let i = 0; i < meshes.exhaustPuffs.length; i++) {
+    const puff = meshes.exhaustPuffs[i];
+    const t = (phase + i * 0.2) % 1.0;
+    puff.position.set(
+      -1.14 + Math.sin(t * 6.0 + i) * 0.06,
+      4.02 + t * 1.45,
+      -0.18 + t * (0.45 + state.speedMs * 0.04)
+    );
+    const s = (0.45 + t * 1.65) * (0.65 + loadFactor * 0.65);
+    puff.scale.setScalar(s);
+    (puff.material as THREE.MeshBasicMaterial).opacity = (1 - t) * 0.24 * loadFactor;
+  }
+
   meshes.steeringWheelGroup.rotation.z = state.steerAngleRad * 6.5;
 
   const rpmFrac = Math.max(0, Math.min(1, state.rpm / 2500));
@@ -1349,15 +1390,15 @@ export function syncPlayerRigMeshes(
     meshes.headlightLeftSpot.distance = state.highBeamOn ? 135 : 85;
     meshes.headlightRightSpot.distance = state.highBeamOn ? 135 : 85;
   }
-  meshes.headlightLensMat.emissiveIntensity = state.headlightsOn ? 2.8 : 0.4;
-  meshes.brakeLightMat.emissiveIntensity = isBraking ? 3.2 : state.headlightsOn ? 0.85 : 0.25;
+  meshes.headlightLensMat.emissiveIntensity = state.headlightsOn ? 2.4 : 0.4;
+  meshes.brakeLightMat.emissiveIntensity = isBraking ? 2.8 : state.headlightsOn ? 0.85 : 0.25;
 
   const leftOn =
     state.indicatorBlinkOn && (state.indicator === 'left' || state.indicator === 'hazard');
   const rightOn =
     state.indicatorBlinkOn && (state.indicator === 'right' || state.indicator === 'hazard');
-  meshes.indicatorLeftMat.emissiveIntensity = leftOn ? 2.8 : 0;
-  meshes.indicatorRightMat.emissiveIntensity = rightOn ? 2.8 : 0;
+  meshes.indicatorLeftMat.emissiveIntensity = leftOn ? 2.6 : 0;
+  meshes.indicatorRightMat.emissiveIntensity = rightOn ? 2.6 : 0;
 
   meshes.trailerRoot.position.set(state.trailerX, state.trailerY, state.trailerZ);
   meshes.trailerRoot.rotation.set(
@@ -1368,9 +1409,158 @@ export function syncPlayerRigMeshes(
   );
 }
 
+// ============================================================================
+// Shared Cached Traffic Geometries & Materials (Zero Redundant Buffer Allocations)
+// ============================================================================
+interface CachedTrafficGeometries {
+  lorryCab: THREE.BufferGeometry;
+  lorryCrown: THREE.BufferGeometry;
+  lorryWs: THREE.BufferGeometry;
+  lorryGrille: THREE.BufferGeometry;
+  lorryCargo: THREE.BufferGeometry;
+  busHull: THREE.BufferGeometry;
+  busWindowBand: THREE.BufferGeometry;
+  busFrontGlass: THREE.BufferGeometry;
+  busAcPod: THREE.BufferGeometry;
+  pickupCab: THREE.BufferGeometry;
+  pickupGlass: THREE.BufferGeometry;
+  pickupBed: THREE.BufferGeometry;
+  pickupCage: THREE.BufferGeometry;
+  sedanBody: THREE.BufferGeometry;
+  sedanGreenhouse: THREE.BufferGeometry;
+  sedanGrille: THREE.BufferGeometry;
+  hlLamp: THREE.BufferGeometry;
+  tlLamp: THREE.BufferGeometry;
+  heavyTire: THREE.BufferGeometry;
+  heavyRim: THREE.BufferGeometry;
+  lightTire: THREE.BufferGeometry;
+  lightRim: THREE.BufferGeometry;
+  trimMat: THREE.MeshStandardMaterial;
+  chromeMat: THREE.MeshStandardMaterial;
+  glassMat: THREE.MeshStandardMaterial;
+  headlightMat: THREE.MeshBasicMaterial;
+  crownMat: THREE.MeshStandardMaterial;
+  tarpMat: THREE.MeshStandardMaterial;
+  cageMat: THREE.MeshStandardMaterial;
+}
+
+let _trafficCache: CachedTrafficGeometries | null = null;
+
+function getTrafficCache(): CachedTrafficGeometries {
+  if (_trafficCache) return _trafficCache;
+
+  _trafficCache = {
+    lorryCab: createSideProfileGeometry(
+      [
+        [-4.35, 0.68],
+        [-4.38, 1.48],
+        [-4.22, 2.48],
+        [-2.15, 2.52],
+        [-2.15, 0.68],
+      ],
+      2.38,
+      0.08,
+      3
+    ),
+    lorryCrown: createSideProfileGeometry(
+      [
+        [-4.15, 2.48],
+        [-4.28, 3.18],
+        [-3.15, 3.28],
+        [-3.15, 2.48],
+      ],
+      2.24,
+      0.06,
+      3
+    ),
+    lorryWs: createRoundedBoxGeometry(2.12, 0.72, 0.1, 0.02, 2),
+    lorryGrille: createRoundedBoxGeometry(1.64, 0.56, 0.1, 0.02, 2),
+    lorryCargo: new THREE.BoxGeometry(2.46, 2.68, 6.55),
+
+    busHull: createSideProfileGeometry(
+      [
+        [-5.58, 0.58],
+        [-5.65, 1.45],
+        [-5.38, 3.12],
+        [5.48, 3.16],
+        [5.58, 2.85],
+        [5.58, 0.62],
+      ],
+      2.54,
+      0.1,
+      4
+    ),
+    busWindowBand: createRoundedBoxGeometry(2.57, 0.96, 10.4, 0.03, 2),
+    busFrontGlass: createRoundedBoxGeometry(2.36, 1.18, 0.12, 0.03, 2),
+    busAcPod: createRoundedBoxGeometry(1.78, 0.28, 2.45, 0.06, 3),
+
+    pickupCab: createSideProfileGeometry(
+      [
+        [-2.35, 0.48],
+        [-2.38, 1.05],
+        [-1.42, 1.16],
+        [-0.96, 1.88],
+        [0.12, 1.88],
+        [0.12, 0.48],
+      ],
+      1.88,
+      0.07,
+      3
+    ),
+    pickupGlass: createRoundedBoxGeometry(1.76, 0.62, 1.05, 0.04, 2),
+    pickupBed: createRoundedBoxGeometry(1.94, 0.85, 2.38, 0.04, 2),
+    pickupCage: createRoundedBoxGeometry(1.88, 0.68, 2.28, 0.03, 2),
+
+    sedanBody: createSideProfileGeometry(
+      [
+        [-2.25, 0.38],
+        [-2.28, 0.78],
+        [-1.25, 0.96],
+        [-0.52, 1.48],
+        [0.88, 1.46],
+        [1.72, 1.02],
+        [2.22, 0.94],
+        [2.25, 0.42],
+      ],
+      1.86,
+      0.08,
+      4
+    ),
+    sedanGreenhouse: createSideProfileGeometry(
+      [
+        [-1.18, 0.94],
+        [-0.48, 1.45],
+        [0.82, 1.43],
+        [1.58, 0.98],
+      ],
+      1.62,
+      0.05,
+      3
+    ),
+    sedanGrille: createRoundedBoxGeometry(1.12, 0.28, 0.08, 0.02, 2),
+
+    hlLamp: createRoundedBoxGeometry(0.36, 0.16, 0.08, 0.02, 2),
+    tlLamp: createRoundedBoxGeometry(0.42, 0.16, 0.08, 0.02, 2),
+    heavyTire: new THREE.CylinderGeometry(0.48, 0.48, 0.28, 16).rotateZ(Math.PI / 2),
+    heavyRim: new THREE.CylinderGeometry(0.3, 0.3, 0.3, 12).rotateZ(Math.PI / 2),
+    lightTire: new THREE.CylinderGeometry(0.38, 0.38, 0.26, 16).rotateZ(Math.PI / 2),
+    lightRim: new THREE.CylinderGeometry(0.24, 0.24, 0.28, 12).rotateZ(Math.PI / 2),
+
+    trimMat: new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.3, roughness: 0.72 }),
+    chromeMat: new THREE.MeshStandardMaterial({ color: 0xe2e8f0, metalness: 0.9, roughness: 0.18 }),
+    glassMat: new THREE.MeshStandardMaterial({ color: 0x0f172a, metalness: 0.85, roughness: 0.12 }),
+    headlightMat: new THREE.MeshBasicMaterial({ color: 0xfef9c3 }),
+    crownMat: new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.38 }),
+    tarpMat: new THREE.MeshStandardMaterial({ color: 0x1e3a8a, roughness: 0.8 }),
+    cageMat: new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.6 }),
+  };
+
+  return _trafficCache;
+}
+
 /**
  * Builds a high-detail sculpted 3D AI Traffic Vehicle mesh (`lorry`, `bus`, `sedan`, `pickup`)
- * using beveled profile extrusions, contoured cabins, alloy/steel wheels, and authentic Indian highway details.
+ * using shared cached beveled profile extrusions for zero lag across all hardware tiers.
  */
 export function buildTrafficVehicleMesh(
   archetype: TrafficArchetype,
@@ -1378,77 +1568,37 @@ export function buildTrafficVehicleMesh(
   textures?: HighwayTextureSet
 ): { root: THREE.Group; brakeMat: THREE.MeshBasicMaterial } {
   const root = new THREE.Group();
+  const c = getTrafficCache();
 
-  const bodyMat = new THREE.MeshPhysicalMaterial({
+  const bodyMat = new THREE.MeshStandardMaterial({
     color: colorHex,
-    metalness: 0.52,
-    roughness: 0.28,
-    clearcoat: 0.65,
+    metalness: 0.48,
+    roughness: 0.3,
   });
-  const trimMat = new THREE.MeshStandardMaterial({
-    color: 0x1e293b,
-    metalness: 0.3,
-    roughness: 0.72,
-  });
-  const chromeMat = new THREE.MeshStandardMaterial({
-    color: 0xe2e8f0,
-    metalness: 0.9,
-    roughness: 0.18,
-  });
-  const glassMat = new THREE.MeshStandardMaterial({
-    color: 0x0f172a,
-    metalness: 0.85,
-    roughness: 0.12,
-  });
-  const headlightMat = new THREE.MeshBasicMaterial({ color: 0xfef9c3 });
   const brakeMat = new THREE.MeshBasicMaterial({ color: 0xdc2626 });
 
-  // Ground contact shadow
   const shadowLen = archetype === 'bus' ? 11.8 : archetype === 'lorry' ? 9.2 : 5.2;
   const shadow = new THREE.Mesh(
     new THREE.PlaneGeometry(2.8, shadowLen),
-    createContactShadowMaterial()
+    getSharedContactShadowMaterial()
   );
   shadow.rotation.x = -Math.PI / 2;
   shadow.position.y = 0.02;
   root.add(shadow);
 
   if (archetype === 'lorry') {
-    // Authentic Indian National Permit Goods Lorry (Sculpted Cab + Taj Crown + Ribbed Cargo Body + Horn OK Please Tailgate)
-    const cabProfile: [number, number][] = [
-      [-4.35, 0.68],
-      [-4.38, 1.48],
-      [-4.22, 2.48],
-      [-2.15, 2.52],
-      [-2.15, 0.68],
-    ];
-    const cabMesh = new THREE.Mesh(createSideProfileGeometry(cabProfile, 2.38, 0.08, 3), bodyMat);
-    root.add(cabMesh);
+    root.add(new THREE.Mesh(c.lorryCab, bodyMat));
+    root.add(new THREE.Mesh(c.lorryCrown, c.crownMat));
 
-    // Ornate Yellow/Red Painted Taj Crown above Cab
-    const crownProfile: [number, number][] = [
-      [-4.15, 2.48],
-      [-4.28, 3.18],
-      [-3.15, 3.28],
-      [-3.15, 2.48],
-    ];
-    const crownMesh = new THREE.Mesh(
-      createSideProfileGeometry(crownProfile, 2.24, 0.06, 3),
-      new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.38 })
-    );
-    root.add(crownMesh);
-
-    // Split Front Windshield & Grille
-    const ws = new THREE.Mesh(createRoundedBoxGeometry(2.12, 0.72, 0.1, 0.02, 2), glassMat);
+    const ws = new THREE.Mesh(c.lorryWs, c.glassMat);
     ws.position.set(0, 1.96, -4.28);
     ws.rotation.x = -0.14;
     root.add(ws);
 
-    const grille = new THREE.Mesh(createRoundedBoxGeometry(1.64, 0.56, 0.1, 0.02, 2), chromeMat);
+    const grille = new THREE.Mesh(c.lorryGrille, c.chromeMat);
     grille.position.set(0, 1.12, -4.36);
     root.add(grille);
 
-    // High Ribbed Wooden/Steel Goods Superstructure + Tailgate Texture
     const cargoMat = new THREE.MeshStandardMaterial({
       color: 0x9a3412,
       normalMap: textures?.containerNormalMap,
@@ -1458,157 +1608,81 @@ export function buildTrafficVehicleMesh(
       ? new THREE.MeshStandardMaterial({ map: textures.lorryTailgateMap, roughness: 0.6 })
       : cargoMat;
 
-    const cargoBox = new THREE.Mesh(new THREE.BoxGeometry(2.46, 2.68, 6.55), [
+    const cargoBox = new THREE.Mesh(c.lorryCargo, [
       cargoMat,
       cargoMat,
-      new THREE.MeshStandardMaterial({ color: 0x1e3a8a, roughness: 0.8 }), // Blue tarpaulin top
-      trimMat,
-      tailgateMat, // +Z Rear "HORN OK PLEASE" tailgate
+      c.tarpMat,
+      c.trimMat,
+      tailgateMat,
       cargoMat,
     ]);
     cargoBox.position.set(0, 1.98, 1.25);
     root.add(cargoBox);
   } else if (archetype === 'bus') {
-    // Aerodynamic Intercity Volvo/Scania Express Coach
-    const busProfile: [number, number][] = [
-      [-5.58, 0.58],
-      [-5.65, 1.45],
-      [-5.38, 3.12],
-      [5.48, 3.16],
-      [5.58, 2.85],
-      [5.58, 0.62],
-    ];
-    const hull = new THREE.Mesh(createSideProfileGeometry(busProfile, 2.54, 0.1, 4), bodyMat);
-    root.add(hull);
+    root.add(new THREE.Mesh(c.busHull, bodyMat));
 
-    // Panoramic Tint Window Band & Front Windshield
-    const windowBand = new THREE.Mesh(
-      createRoundedBoxGeometry(2.57, 0.96, 10.4, 0.03, 2),
-      glassMat
-    );
+    const windowBand = new THREE.Mesh(c.busWindowBand, c.glassMat);
     windowBand.position.set(0, 2.28, -0.1);
     root.add(windowBand);
 
-    const frontGlass = new THREE.Mesh(
-      createRoundedBoxGeometry(2.36, 1.18, 0.12, 0.03, 2),
-      glassMat
-    );
+    const frontGlass = new THREE.Mesh(c.busFrontGlass, c.glassMat);
     frontGlass.position.set(0, 2.15, -5.48);
     frontGlass.rotation.x = -0.16;
     root.add(frontGlass);
 
-    // Dual Rooftop HVAC Air Conditioning Pods
     for (const az of [-1.8, 1.9]) {
-      const acPod = new THREE.Mesh(
-        createRoundedBoxGeometry(1.78, 0.28, 2.45, 0.06, 3),
-        trimMat
-      );
+      const acPod = new THREE.Mesh(c.busAcPod, c.trimMat);
       acPod.position.set(0, 3.26, az);
       root.add(acPod);
     }
   } else if (archetype === 'pickup') {
-    // Sculpted Commercial Pickup Truck with Steel Cargo Rack
-    const cabProfile: [number, number][] = [
-      [-2.35, 0.48],
-      [-2.38, 1.05],
-      [-1.42, 1.16],
-      [-0.96, 1.88],
-      [0.12, 1.88],
-      [0.12, 0.48],
-    ];
-    const cab = new THREE.Mesh(createSideProfileGeometry(cabProfile, 1.88, 0.07, 3), bodyMat);
-    root.add(cab);
+    root.add(new THREE.Mesh(c.pickupCab, bodyMat));
 
-    const cabinGlass = new THREE.Mesh(
-      createRoundedBoxGeometry(1.76, 0.62, 1.05, 0.04, 2),
-      glassMat
-    );
+    const cabinGlass = new THREE.Mesh(c.pickupGlass, c.glassMat);
     cabinGlass.position.set(0, 1.54, -0.45);
     root.add(cabinGlass);
 
-    const cargoBed = new THREE.Mesh(
-      createRoundedBoxGeometry(1.94, 0.85, 2.38, 0.04, 2),
-      trimMat
-    );
+    const cargoBed = new THREE.Mesh(c.pickupBed, c.trimMat);
     cargoBed.position.set(0, 0.92, 1.32);
     root.add(cargoBed);
 
-    // High-Carrier Tubular Cargo Cage
-    const cageFrame = new THREE.Mesh(
-      createRoundedBoxGeometry(1.88, 0.68, 2.28, 0.03, 2),
-      new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.6, wireframe: false })
-    );
+    const cageFrame = new THREE.Mesh(c.pickupCage, c.cageMat);
     cageFrame.position.set(0, 1.62, 1.32);
     root.add(cageFrame);
   } else {
-    // Sculpted Aerodynamic Fastback Highway Sedan / SUV
-    const sedanProfile: [number, number][] = [
-      [-2.25, 0.38],
-      [-2.28, 0.78],
-      [-1.25, 0.96],
-      [-0.52, 1.48],
-      [0.88, 1.46],
-      [1.72, 1.02],
-      [2.22, 0.94],
-      [2.25, 0.42],
-    ];
-    const body = new THREE.Mesh(createSideProfileGeometry(sedanProfile, 1.86, 0.08, 4), bodyMat);
-    root.add(body);
+    root.add(new THREE.Mesh(c.sedanBody, bodyMat));
+    root.add(new THREE.Mesh(c.sedanGreenhouse, c.glassMat));
 
-    const greenhouseProfile: [number, number][] = [
-      [-1.18, 0.94],
-      [-0.48, 1.45],
-      [0.82, 1.43],
-      [1.58, 0.98],
-    ];
-    const greenhouse = new THREE.Mesh(
-      createSideProfileGeometry(greenhouseProfile, 1.62, 0.05, 3),
-      glassMat
-    );
-    root.add(greenhouse);
-
-    const frontGrille = new THREE.Mesh(
-      createRoundedBoxGeometry(1.12, 0.28, 0.08, 0.02, 2),
-      trimMat
-    );
+    const frontGrille = new THREE.Mesh(c.sedanGrille, c.trimMat);
     frontGrille.position.set(0, 0.62, -2.26);
     root.add(frontGrille);
   }
 
-  // Dual Headlights (-Z front) & Wide LED Taillight Bars (+Z rear)
   const halfLen = archetype === 'bus' ? 5.6 : archetype === 'lorry' ? 4.36 : 2.25;
   const lampSpread = archetype === 'sedan' || archetype === 'pickup' ? 0.68 : 0.88;
   for (const side of [-1, 1]) {
-    const hl = new THREE.Mesh(
-      createRoundedBoxGeometry(0.36, 0.16, 0.08, 0.02, 2),
-      headlightMat
-    );
+    const hl = new THREE.Mesh(c.hlLamp, c.headlightMat);
     hl.position.set(side * lampSpread, 0.76, -halfLen);
     root.add(hl);
 
-    const tl = new THREE.Mesh(
-      createRoundedBoxGeometry(0.42, 0.16, 0.08, 0.02, 2),
-      brakeMat
-    );
+    const tl = new THREE.Mesh(c.tlLamp, brakeMat);
     tl.position.set(side * lampSpread, 0.82, halfLen);
     root.add(tl);
   }
 
-  // Detailed Wheels with Alloy/Steel Rims
-  const wheelRadius = archetype === 'sedan' ? 0.36 : archetype === 'pickup' ? 0.4 : 0.48;
-  const tireGeo = new THREE.CylinderGeometry(wheelRadius, wheelRadius, 0.28, 18).rotateZ(Math.PI / 2);
-  const rimGeo = new THREE.CylinderGeometry(wheelRadius * 0.62, wheelRadius * 0.62, 0.3, 14).rotateZ(
-    Math.PI / 2
-  );
+  const isLight = archetype === 'sedan' || archetype === 'pickup';
+  const wheelRadius = isLight ? 0.38 : 0.48;
+  const tireGeo = isLight ? c.lightTire : c.heavyTire;
+  const rimGeo = isLight ? c.lightRim : c.heavyRim;
   const wheelZ = halfLen * 0.64;
-  const wheelX = archetype === 'sedan' || archetype === 'pickup' ? 0.88 : 1.14;
+  const wheelX = isLight ? 0.88 : 1.14;
   for (const wx of [-wheelX, wheelX]) {
     for (const wz of [-wheelZ, wheelZ]) {
-      const tire = new THREE.Mesh(tireGeo, trimMat);
+      const tire = new THREE.Mesh(tireGeo, c.trimMat);
       tire.position.set(wx, wheelRadius, wz);
       root.add(tire);
 
-      const rim = new THREE.Mesh(rimGeo, chromeMat);
+      const rim = new THREE.Mesh(rimGeo, c.chromeMat);
       rim.position.set(wx, wheelRadius, wz);
       root.add(rim);
     }

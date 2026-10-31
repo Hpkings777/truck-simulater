@@ -4,11 +4,12 @@ import {
   HIGHWAY_LENGTH_M,
   splineToWorld,
 } from '../physics/highwaySpline';
-import { HighwayTextureSet } from './materialsAndTextures';
+import { applyUltraMicroShaderToAsphalt, HighwayTextureSet } from './materialsAndTextures';
 import { buildTrafficVehicleMesh } from './truckBuilder';
 
 export interface HighwayEnvironmentHandles {
   root: THREE.Group;
+  roadMat: THREE.MeshStandardMaterial;
   streetLightHeadsMat: THREE.MeshBasicMaterial;
   dhabaLightsMat: THREE.MeshBasicMaterial;
 }
@@ -220,6 +221,9 @@ export function buildHighwayEnvironment(
     roughness: 1.0,
     metalness: 0.1,
   });
+  if (!isSoftwareGl) {
+    applyUltraMicroShaderToAsphalt(roadMat);
+  }
   const roadMesh = new THREE.Mesh(roadGeo, roadMat);
   roadMesh.receiveShadow = !isSoftwareGl;
   root.add(roadMesh);
@@ -1060,8 +1064,29 @@ export function buildHighwayEnvironment(
     root.add(bldgGroup);
   }
 
+  // Instanced Red/Amber Retro-Reflective Highway Guide Delineators along Guardrail Tops
+  const delinCount = 240;
+  const delinGeo = new THREE.BoxGeometry(0.08, 0.24, 0.04);
+  delinGeo.translate(0, 0.94, 0);
+  const delinMat = new THREE.MeshBasicMaterial({ color: 0xef4444 });
+  const delinInst = new THREE.InstancedMesh(delinGeo, delinMat, delinCount);
+  for (let i = 0; i < delinCount; i++) {
+    const s = Math.floor(i / 2) * 40 + 15;
+    const side = i % 2 === 0 ? -1 : 1;
+    const pPos = splineToWorld(s, side * 12.18, 0);
+    dummy.position.set(pPos.x, pPos.y, pPos.z);
+    dummy.rotation.set(0, -pPos.sample.heading, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    delinInst.setMatrixAt(i, dummy.matrix);
+  }
+  delinInst.instanceMatrix.needsUpdate = true;
+  delinInst.computeBoundingSphere();
+  root.add(delinInst);
+
   return {
     root,
+    roadMat,
     streetLightHeadsMat,
     dhabaLightsMat,
   };

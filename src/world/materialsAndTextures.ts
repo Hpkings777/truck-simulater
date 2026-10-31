@@ -24,7 +24,13 @@ export interface HighwayTextureSet {
   cloudLayerMap: THREE.CanvasTexture;
   dashboardClusterMap: THREE.CanvasTexture;
   gpsNavMap: THREE.CanvasTexture;
-  updateCabinDisplays: (state: TruckPhysicsState, traffic: TrafficVehicle[]) => void;
+  isUltra4KUpgraded: boolean;
+  upgradeToUltra4K: (maxAnisotropy: number) => void;
+  updateCabinDisplays: (
+    state: TruckPhysicsState,
+    traffic: TrafficVehicle[],
+    isCabinActive?: boolean
+  ) => void;
   createGantrySignTexture: (
     titleEn: string,
     titleHi: string,
@@ -33,6 +39,82 @@ export interface HighwayTextureSet {
     routeBadge: string
   ) => THREE.CanvasTexture;
   createMilestoneTexture: (cityName: string, kmLeft: number) => THREE.CanvasTexture;
+}
+
+/**
+ * Injects a custom GLSL procedural micro-aggregate & anisotropic road-sheen shader
+ * into the highway asphalt MeshStandardMaterial so close-up asphalt has infinite detail.
+ */
+export function applyUltraMicroShaderToAsphalt(material: THREE.MeshStandardMaterial): void {
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <common>',
+      `#include <common>
+       varying vec3 vWorldPosMicro;`
+    );
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <worldpos_vertex>',
+      `#include <worldpos_vertex>
+       vWorldPosMicro = (modelMatrix * vec4(transformed, 1.0)).xyz;`
+    );
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <common>',
+      `#include <common>
+       varying vec3 vWorldPosMicro;
+       float hash12Micro(vec2 p) {
+         vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+         p3 += dot(p3, p3.yzx + 33.33);
+         return fract((p3.x + p3.y) * p3.z);
+       }`
+    );
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <roughnessmap_fragment>',
+      `#include <roughnessmap_fragment>
+       float microStone = hash12Micro(floor(vWorldPosMicro.xz * 38.0));
+       float macroPatch = sin(vWorldPosMicro.z * 0.09 + vWorldPosMicro.x * 0.25) * 0.5 + 0.5;
+       roughnessFactor = clamp(roughnessFactor + (microStone - 0.5) * 0.12 - macroPatch * 0.05, 0.22, 0.95);
+       diffuseColor.rgb *= (0.94 + microStone * 0.12);`
+    );
+  };
+  material.needsUpdate = true;
+}
+
+/**
+ * Injects a custom GLSL metallic flake & clearcoat depth shader into the truck's body paint.
+ */
+export function applyUltraFlakeShaderToPaint(material: THREE.MeshPhysicalMaterial): void {
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <common>',
+      `#include <common>
+       varying vec3 vLocalPosFlake;`
+    );
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <begin_vertex>',
+      `#include <begin_vertex>
+       vLocalPosFlake = position;`
+    );
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <common>',
+      `#include <common>
+       varying vec3 vLocalPosFlake;
+       float flakeHash(vec3 p) {
+         p = fract(p * 0.3183099 + 0.1);
+         p *= 17.0;
+         return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+       }`
+    );
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <roughnessmap_fragment>',
+      `#include <roughnessmap_fragment>
+       float flake = flakeHash(floor(vLocalPosFlake * 95.0));
+       roughnessFactor = clamp(roughnessFactor - flake * 0.06, 0.08, 0.45);
+       diffuseColor.rgb += vec3(flake * 0.045, flake * 0.02, 0.0);`
+    );
+  };
+  material.needsUpdate = true;
 }
 
 /**
@@ -90,6 +172,163 @@ function createNormalMapFromHeightCanvas(
   return tex;
 }
 
+/**
+ * Draws the 4-lane divided NH-44 asphalt texture onto the target canvas at any resolution (1024 or 2048/4096 UHD).
+ */
+function paintAsphaltCanvas(canvas: HTMLCanvasElement, grainSamples: number): void {
+  const S = canvas.width;
+  const scale = S / 1024;
+  const actx = canvas.getContext('2d')!;
+
+  actx.fillStyle = '#1f2226';
+  actx.fillRect(0, 0, S, S);
+
+  // Shoulders dusty brown-grey aggregate
+  const leftShoulderGrad = actx.createLinearGradient(0, 0, 118 * scale, 0);
+  leftShoulderGrad.addColorStop(0, '#443c32');
+  leftShoulderGrad.addColorStop(0.75, '#332f2a');
+  leftShoulderGrad.addColorStop(1, '#222428');
+  actx.fillStyle = leftShoulderGrad;
+  actx.fillRect(0, 0, 118 * scale, S);
+
+  const rightShoulderGrad = actx.createLinearGradient(906 * scale, 0, S, 0);
+  rightShoulderGrad.addColorStop(0, '#222428');
+  rightShoulderGrad.addColorStop(0.25, '#332f2a');
+  rightShoulderGrad.addColorStop(1, '#443c32');
+  actx.fillStyle = rightShoulderGrad;
+  actx.fillRect(906 * scale, 0, 118 * scale, S);
+
+  // Central median edge dust & ambient occlusion strips
+  const medGrad = actx.createLinearGradient(418 * scale, 0, 606 * scale, 0);
+  medGrad.addColorStop(0, 'rgba(28, 25, 22, 0)');
+  medGrad.addColorStop(0.12, 'rgba(68, 58, 45, 0.55)');
+  medGrad.addColorStop(0.5, 'rgba(18, 16, 15, 0.85)');
+  medGrad.addColorStop(0.88, 'rgba(68, 58, 45, 0.55)');
+  medGrad.addColorStop(1, 'rgba(28, 25, 22, 0)');
+  actx.fillStyle = medGrad;
+  actx.fillRect(418 * scale, 0, 188 * scale, S);
+
+  // Polished wheel wear tracks in all 4 lanes
+  const laneCentersU = [0.188, 0.342, 0.658, 0.812];
+  for (const u of laneCentersU) {
+    const cx = u * S;
+    const hw = 64 * scale;
+    const grad = actx.createLinearGradient(cx - hw, 0, cx + hw, 0);
+    grad.addColorStop(0, 'rgba(12, 14, 17, 0)');
+    grad.addColorStop(0.24, 'rgba(10, 12, 15, 0.54)');
+    grad.addColorStop(0.5, 'rgba(28, 31, 36, 0.16)');
+    grad.addColorStop(0.76, 'rgba(10, 12, 15, 0.54)');
+    grad.addColorStop(1, 'rgba(12, 14, 17, 0)');
+    actx.fillStyle = grad;
+    actx.fillRect(cx - hw, 0, hw * 2, S);
+  }
+
+  // Dense multi-scale stone aggregate & weathered bitumen patches
+  for (let i = 0; i < grainSamples; i++) {
+    const rx = (i * 7919) % S;
+    const ry = (i * 6271) % S;
+    const shade = 24 + ((i * 37) % 34);
+    actx.fillStyle = `rgb(${shade}, ${shade + 1}, ${shade + 3})`;
+    actx.fillRect(rx, ry, i % 3 === 0 ? 3 : 2, 2);
+  }
+
+  // Bitumen overband crack sealing snakes & repair patches
+  actx.fillStyle = 'rgba(14, 16, 19, 0.68)';
+  actx.fillRect(158 * scale, 180 * scale, 54 * scale, 195 * scale);
+  actx.fillRect(318 * scale, 640 * scale, 66 * scale, 145 * scale);
+  actx.fillRect(675 * scale, 380 * scale, 56 * scale, 165 * scale);
+
+  // Longitudinal tar crack lines
+  actx.strokeStyle = 'rgba(10, 11, 13, 0.82)';
+  actx.lineWidth = 2.5 * scale;
+  for (const crackX of [212, 365, 695, 835]) {
+    actx.beginPath();
+    actx.moveTo(crackX * scale, 0);
+    for (let y = 64; y <= 1024; y += 64) {
+      actx.lineTo((crackX + Math.sin(y * 0.04 + crackX) * 8) * scale, y * scale);
+    }
+    actx.stroke();
+  }
+
+  // Outer solid white shoulder edge markings
+  actx.fillStyle = '#f1f5f9';
+  actx.fillRect(110 * scale, 0, 10 * scale, S);
+  actx.fillRect(904 * scale, 0, 10 * scale, S);
+
+  // Inner yellow median edge markings
+  actx.fillStyle = '#facc15';
+  actx.fillRect(422 * scale, 0, 10 * scale, S);
+  actx.fillRect(592 * scale, 0, 10 * scale, S);
+
+  // Dashed white lane dividers (between L1 & L2 on both carriageways)
+  actx.fillStyle = '#f8fafc';
+  const leftDividerX = Math.round(0.265 * S) - 5 * scale;
+  const rightDividerX = Math.round(0.735 * S) - 5 * scale;
+  for (let y = 20; y < 1024; y += 128) {
+    actx.fillRect(leftDividerX, y * scale, 10 * scale, 62 * scale);
+    actx.fillRect(rightDividerX, y * scale, 10 * scale, 62 * scale);
+  }
+
+  // Rumble strips on outer shoulders
+  actx.fillStyle = 'rgba(226, 232, 240, 0.44)';
+  for (let y = 0; y < 1024; y += 24) {
+    actx.fillRect(86 * scale, y * scale, 18 * scale, 10 * scale);
+    actx.fillRect(920 * scale, y * scale, 18 * scale, 10 * scale);
+  }
+}
+
+/**
+ * Draws the 40ft Bharat Freight Corridor shipping container side livery at any resolution (1024 or 2048 UHD).
+ */
+function paintContainerSideCanvas(canvas: HTMLCanvasElement): void {
+  const W = canvas.width;
+  const H = canvas.height;
+  const sx = W / 1024;
+  const sy = H / 512;
+  const kctx = canvas.getContext('2d')!;
+
+  kctx.fillStyle = '#173152';
+  kctx.fillRect(0, 0, W, H);
+
+  for (let x = 0; x < 1024; x += 16) {
+    kctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+    kctx.fillRect(x * sx, 26 * sy, 6 * sx, 460 * sy);
+    kctx.fillStyle = 'rgba(255, 255, 255, 0.11)';
+    kctx.fillRect((x + 6) * sx, 26 * sy, 4 * sx, 460 * sy);
+  }
+
+  kctx.fillStyle = '#0c1d33';
+  kctx.fillRect(0, 0, W, 32 * sy);
+  kctx.fillRect(0, 480 * sy, W, 32 * sy);
+  kctx.fillRect(0, 0, 28 * sx, H);
+  kctx.fillRect(996 * sx, 0, 28 * sx, H);
+
+  kctx.fillStyle = '#f59e0b';
+  kctx.fillRect(60 * sx, 148 * sy, 904 * sx, 14 * sy);
+  kctx.fillRect(60 * sx, 346 * sy, 904 * sx, 8 * sy);
+
+  kctx.fillStyle = '#f8fafc';
+  kctx.font = `700 ${Math.round(54 * sx)}px "Chakra Petch", sans-serif`;
+  kctx.fillText('BHARAT FREIGHT CORRIDOR', 84 * sx, 232 * sy);
+  kctx.fillStyle = '#fbbf24';
+  kctx.font = `600 ${Math.round(28 * sx)}px "Plus Jakarta Sans", sans-serif`;
+  kctx.fillText(
+    'NH-44 GRAND TRUNK EXPRESS · HEAVY HAUL LOGISTICS · IN-HR-44',
+    88 * sx,
+    284 * sy
+  );
+
+  kctx.fillStyle = '#e2e8f0';
+  kctx.font = `600 ${Math.round(22 * sx)}px "JetBrains Mono", monospace`;
+  kctx.fillText('BFCL 449280-7', 775 * sx, 92 * sy);
+  kctx.fillText('45G1 · MAX GROSS 32,500 KG', 682 * sx, 122 * sy);
+
+  for (let x = 32; x < 992; x += 48) {
+    kctx.fillStyle = x % 96 === 32 ? '#ef4444' : '#f8fafc';
+    kctx.fillRect(x * sx, 488 * sy, 36 * sx, 12 * sy);
+  }
+}
+
 export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
   // ============================================================================
   // 1. 4-Lane Divided Highway Asphalt Albedo + Normal Map + Specular Roughness Map
@@ -97,7 +336,7 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
   const asphaltCanvas = document.createElement('canvas');
   asphaltCanvas.width = 1024;
   asphaltCanvas.height = 1024;
-  const actx = asphaltCanvas.getContext('2d')!;
+  paintAsphaltCanvas(asphaltCanvas, 26000);
 
   const asphaltHeightCanvas = document.createElement('canvas');
   asphaltHeightCanvas.width = 512;
@@ -109,140 +348,41 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
   asphaltRoughCanvas.height = 512;
   const arctx = asphaltRoughCanvas.getContext('2d')!;
 
-  // Base basalt highway asphalt
-  actx.fillStyle = '#1f2226';
-  actx.fillRect(0, 0, 1024, 1024);
-
-  // Base roughness (0.82 = 210)
   arctx.fillStyle = 'rgb(212, 212, 212)';
   arctx.fillRect(0, 0, 512, 512);
-
-  // Shoulders dusty brown-grey aggregate + higher roughness
-  const leftShoulderGrad = actx.createLinearGradient(0, 0, 118, 0);
-  leftShoulderGrad.addColorStop(0, '#443c32');
-  leftShoulderGrad.addColorStop(0.75, '#332f2a');
-  leftShoulderGrad.addColorStop(1, '#222428');
-  actx.fillStyle = leftShoulderGrad;
-  actx.fillRect(0, 0, 118, 1024);
-
-  const rightShoulderGrad = actx.createLinearGradient(906, 0, 1024, 0);
-  rightShoulderGrad.addColorStop(0, '#222428');
-  rightShoulderGrad.addColorStop(0.25, '#332f2a');
-  rightShoulderGrad.addColorStop(1, '#443c32');
-  actx.fillStyle = rightShoulderGrad;
-  actx.fillRect(906, 0, 118, 1024);
-
   arctx.fillStyle = 'rgb(242, 242, 242)';
   arctx.fillRect(0, 0, 58, 512);
   arctx.fillRect(454, 0, 58, 512);
 
-  // Central median edge dust & ambient occlusion strips
-  const medGrad = actx.createLinearGradient(418, 0, 606, 0);
-  medGrad.addColorStop(0, 'rgba(28, 25, 22, 0)');
-  medGrad.addColorStop(0.12, 'rgba(68, 58, 45, 0.55)');
-  medGrad.addColorStop(0.5, 'rgba(18, 16, 15, 0.85)');
-  medGrad.addColorStop(0.88, 'rgba(68, 58, 45, 0.55)');
-  medGrad.addColorStop(1, 'rgba(28, 25, 22, 0)');
-  actx.fillStyle = medGrad;
-  actx.fillRect(418, 0, 188, 1024);
-
-  // Polished wheel wear tracks in all 4 lanes (darker oil-stained centers + low roughness for sun sheen)
   const laneCentersU = [0.188, 0.342, 0.658, 0.812];
   for (const u of laneCentersU) {
-    const cx = u * 1024;
-    const grad = actx.createLinearGradient(cx - 64, 0, cx + 64, 0);
-    grad.addColorStop(0, 'rgba(12, 14, 17, 0)');
-    grad.addColorStop(0.24, 'rgba(10, 12, 15, 0.52)');
-    grad.addColorStop(0.5, 'rgba(28, 31, 36, 0.16)');
-    grad.addColorStop(0.76, 'rgba(10, 12, 15, 0.52)');
-    grad.addColorStop(1, 'rgba(12, 14, 17, 0)');
-    actx.fillStyle = grad;
-    actx.fillRect(cx - 64, 0, 128, 1024);
-
-    // Specular wheel-track polish on roughness map
     const rcx = u * 512;
     const rGrad = arctx.createLinearGradient(rcx - 32, 0, rcx + 32, 0);
     rGrad.addColorStop(0, 'rgba(210, 210, 210, 0)');
-    rGrad.addColorStop(0.25, 'rgba(92, 92, 92, 0.85)');
+    rGrad.addColorStop(0.25, 'rgba(88, 88, 88, 0.88)');
     rGrad.addColorStop(0.5, 'rgba(175, 175, 175, 0.4)');
-    rGrad.addColorStop(0.75, 'rgba(92, 92, 92, 0.85)');
+    rGrad.addColorStop(0.75, 'rgba(88, 88, 88, 0.88)');
     rGrad.addColorStop(1, 'rgba(210, 210, 210, 0)');
     arctx.fillStyle = rGrad;
     arctx.fillRect(rcx - 32, 0, 64, 512);
   }
-
-  // Dense multi-scale stone aggregate & weathered bitumen patches
-  for (let i = 0; i < 24000; i++) {
-    const rx = (i * 7919) % 1024;
-    const ry = (i * 6271) % 1024;
-    const shade = 24 + ((i * 37) % 34);
-    actx.fillStyle = `rgb(${shade}, ${shade + 1}, ${shade + 3})`;
-    actx.fillRect(rx, ry, i % 3 === 0 ? 3 : 2, 2);
-  }
-
-  // Bitumen overband crack sealing snakes & repair patches
-  actx.fillStyle = 'rgba(14, 16, 19, 0.68)';
-  actx.fillRect(158, 180, 54, 195);
-  actx.fillRect(318, 640, 66, 145);
-  actx.fillRect(675, 380, 56, 165);
-  arctx.fillStyle = 'rgb(75, 75, 75)'; // Tar patches are glossy
+  arctx.fillStyle = 'rgb(75, 75, 75)';
   arctx.fillRect(79, 90, 27, 97);
   arctx.fillRect(159, 320, 33, 72);
 
-  // Longitudinal tar crack lines
-  actx.strokeStyle = 'rgba(10, 11, 13, 0.78)';
-  actx.lineWidth = 2.5;
-  for (const crackX of [212, 365, 695, 835]) {
-    actx.beginPath();
-    actx.moveTo(crackX, 0);
-    for (let y = 64; y <= 1024; y += 64) {
-      actx.lineTo(crackX + Math.sin(y * 0.04 + crackX) * 8, y);
-    }
-    actx.stroke();
-  }
-
-  // Height map for normal map generation
   ahctx.fillStyle = '#808080';
   ahctx.fillRect(0, 0, 512, 512);
-  for (let i = 0; i < 22000; i++) {
+  for (let i = 0; i < 24000; i++) {
     const rx = (i * 4999) % 512;
     const ry = (i * 3571) % 512;
-    const v = 76 + ((i * 53) % 104);
+    const v = 74 + ((i * 53) % 108);
     ahctx.fillStyle = `rgb(${v},${v},${v})`;
     ahctx.fillRect(rx, ry, 2, 2);
   }
-  // Rumble strip grooves in height map
   ahctx.fillStyle = '#252525';
   for (let y = 0; y < 512; y += 12) {
     ahctx.fillRect(44, y, 8, 5);
     ahctx.fillRect(460, y, 8, 5);
-  }
-
-  // Thermoplastic road markings (with subtle wear & high visibility)
-  // Outer solid white shoulder edge markings
-  actx.fillStyle = '#f1f5f9';
-  actx.fillRect(110, 0, 10, 1024);
-  actx.fillRect(904, 0, 10, 1024);
-
-  // Inner yellow median edge markings
-  actx.fillStyle = '#facc15';
-  actx.fillRect(422, 0, 10, 1024);
-  actx.fillRect(592, 0, 10, 1024);
-
-  // Dashed white lane dividers (between L1 & L2 on both carriageways)
-  actx.fillStyle = '#f8fafc';
-  const leftDividerX = Math.round(0.265 * 1024) - 5;
-  const rightDividerX = Math.round(0.735 * 1024) - 5;
-  for (let y = 20; y < 1024; y += 128) {
-    actx.fillRect(leftDividerX, y, 10, 62);
-    actx.fillRect(rightDividerX, y, 10, 62);
-  }
-
-  // Rumble strips on outer shoulders
-  actx.fillStyle = 'rgba(226, 232, 240, 0.42)';
-  for (let y = 0; y < 1024; y += 24) {
-    actx.fillRect(86, y, 18, 10);
-    actx.fillRect(920, y, 18, 10);
   }
 
   const asphaltMap = new THREE.CanvasTexture(asphaltCanvas);
@@ -270,7 +410,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
   cctx.fillStyle = '#827e77';
   cctx.fillRect(0, 0, 512, 512);
 
-  // Weathering & base dirt gradient
   const concGrad = cctx.createLinearGradient(0, 0, 0, 512);
   concGrad.addColorStop(0, 'rgba(30, 28, 25, 0.28)');
   concGrad.addColorStop(0.25, 'rgba(255, 255, 255, 0.05)');
@@ -286,7 +425,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     cctx.fillStyle = `rgb(${v}, ${v - 2}, ${v - 5})`;
     cctx.fillRect(x, y, 3, 3);
   }
-  // Precast panel seams & formwork tie-rod holes
   cctx.strokeStyle = 'rgba(32, 30, 27, 0.48)';
   cctx.lineWidth = 3;
   cctx.strokeRect(4, 4, 504, 248);
@@ -326,7 +464,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     hctx.closePath();
     hctx.fill();
   }
-  // Subtle road grime along lower edge
   const hazDirt = hctx.createLinearGradient(0, 75, 0, 128);
   hazDirt.addColorStop(0, 'rgba(24, 22, 18, 0)');
   hazDirt.addColorStop(1, 'rgba(24, 22, 18, 0.58)');
@@ -355,7 +492,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
   gctx.fillStyle = grGrad;
   gctx.fillRect(0, 0, 256, 128);
 
-  // Splice bolts & red/white reflector tabs
   gctx.fillStyle = '#334155';
   for (let x = 16; x < 256; x += 64) {
     gctx.fillRect(x, 12, 4, 104);
@@ -402,7 +538,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
       tctx.fillStyle = fieldColors[(row * 3 + col) % fieldColors.length];
       tctx.fillRect(fx + 4, fy + 4, 248, 120);
 
-      // Ploughed furrow lines & irrigation bunds
       tctx.fillStyle = 'rgba(22, 20, 13, 0.26)';
       const horizontal = (row + col) % 2 === 0;
       if (horizontal) {
@@ -414,7 +549,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
           tctx.fillRect(fx + f, fy + 6, 3, 116);
         }
       }
-      // Earth bund border around field plot
       tctx.strokeStyle = '#3b3222';
       tctx.lineWidth = 6;
       tctx.strokeRect(fx + 2, fy + 2, 252, 124);
@@ -448,53 +582,12 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
   const contCanvas = document.createElement('canvas');
   contCanvas.width = 1024;
   contCanvas.height = 512;
-  const kctx = contCanvas.getContext('2d')!;
-  kctx.fillStyle = '#173152';
-  kctx.fillRect(0, 0, 1024, 512);
-
-  // Corrugated steel vertical shading ribs
-  for (let x = 0; x < 1024; x += 16) {
-    kctx.fillStyle = 'rgba(0, 0, 0, 0.24)';
-    kctx.fillRect(x, 26, 6, 460);
-    kctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
-    kctx.fillRect(x + 6, 26, 4, 460);
-  }
-  // Top & bottom structural Corten steel rails + corner castings
-  kctx.fillStyle = '#0c1d33';
-  kctx.fillRect(0, 0, 1024, 32);
-  kctx.fillRect(0, 480, 1024, 32);
-  kctx.fillRect(0, 0, 28, 512);
-  kctx.fillRect(996, 0, 28, 512);
-
-  // Saffron-gold & white logistics branding stripe
-  kctx.fillStyle = '#f59e0b';
-  kctx.fillRect(60, 148, 904, 14);
-  kctx.fillRect(60, 346, 904, 8);
-
-  kctx.fillStyle = '#f8fafc';
-  kctx.font = '700 54px "Chakra Petch", sans-serif';
-  kctx.fillText('BHARAT FREIGHT CORRIDOR', 84, 232);
-  kctx.fillStyle = '#fbbf24';
-  kctx.font = '600 28px "Plus Jakarta Sans", sans-serif';
-  kctx.fillText('NH-44 GRAND TRUNK EXPRESS · HEAVY HAUL LOGISTICS · IN-HR-44', 88, 284);
-
-  // ISO container code block
-  kctx.fillStyle = '#e2e8f0';
-  kctx.font = '600 22px "JetBrains Mono", monospace';
-  kctx.fillText('BFCL 449280-7', 775, 92);
-  kctx.fillText('45G1 · MAX GROSS 32,500 KG', 682, 122);
-
-  // Reflective conspicuity tape along bottom rail
-  for (let x = 32; x < 992; x += 48) {
-    kctx.fillStyle = x % 96 === 32 ? '#ef4444' : '#f8fafc';
-    kctx.fillRect(x, 488, 36, 12);
-  }
+  paintContainerSideCanvas(contCanvas);
 
   const containerSideMap = new THREE.CanvasTexture(contCanvas);
   containerSideMap.colorSpace = THREE.SRGBColorSpace;
   containerSideMap.anisotropy = maxAnisotropy;
 
-  // Container Rear Double Doors Texture
   const contRearCanvas = document.createElement('canvas');
   contRearCanvas.width = 512;
   contRearCanvas.height = 512;
@@ -505,13 +598,11 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     crctx.fillStyle = 'rgba(0,0,0,0.22)';
     crctx.fillRect(x, 28, 10, 456);
   }
-  // Center door rubber gasket seam & hinges
   crctx.fillStyle = '#090d14';
   crctx.fillRect(252, 20, 8, 472);
   crctx.strokeStyle = '#090d14';
   crctx.lineWidth = 10;
   crctx.strokeRect(18, 20, 476, 472);
-  // Yellow/Red Chevron High-Visibility Heavy Vehicle Rear Warning Plates
   crctx.fillStyle = '#facc15';
   crctx.fillRect(42, 390, 160, 54);
   crctx.fillRect(310, 390, 160, 54);
@@ -610,7 +701,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
   thctx.fillRect(0, 0, 256, 256);
   thctx.fillStyle = '#d8d8d8';
   for (let y = 0; y < 256; y += 24) {
-    // Lugged heavy commercial truck tread blocks
     thctx.fillRect(14, y, 48, 16);
     thctx.fillRect(72, y + 6, 48, 16);
     thctx.fillRect(136, y, 48, 16);
@@ -620,7 +710,7 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
   tireTreadNormalMap.repeat.set(1, 6);
 
   // ============================================================================
-  // 9. Tree Bark Albedo & High-Altitude Atmospheric Cloud Layer Texture
+  // 9. Tree Bark Albedo & Soft Radial-Faded High-Altitude Cirrus Cloud Texture
   // ============================================================================
   const barkCanvas = document.createElement('canvas');
   barkCanvas.width = 256;
@@ -639,19 +729,23 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
   barkMap.wrapS = THREE.RepeatWrapping;
   barkMap.wrapT = THREE.RepeatWrapping;
 
+  // Radial-faded wispy clouds so the sky dome never shows a hard horizontal band
   const cloudCanvas = document.createElement('canvas');
   cloudCanvas.width = 512;
   cloudCanvas.height = 512;
   const clctx = cloudCanvas.getContext('2d')!;
   clctx.clearRect(0, 0, 512, 512);
-  for (let i = 0; i < 160; i++) {
-    const cx = (i * 197) % 512;
-    const cy = (i * 263) % 512;
-    const r = 36 + ((i * 41) % 72);
-    const g = clctx.createRadialGradient(cx, cy, 4, cx, cy, r);
-    g.addColorStop(0, 'rgba(255, 252, 245, 0.22)');
-    g.addColorStop(0.55, 'rgba(255, 248, 235, 0.09)');
-    g.addColorStop(1, 'rgba(255, 248, 235, 0)');
+  for (let i = 0; i < 95; i++) {
+    const angle = (i * 2.39996) % (Math.PI * 2);
+    const dist = Math.sqrt(i / 95) * 195;
+    const cx = 256 + Math.cos(angle) * dist;
+    const cy = 256 + Math.sin(angle) * dist;
+    const edgeFade = Math.max(0, 1 - dist / 215);
+    const r = 28 + ((i * 37) % 54);
+    const g = clctx.createRadialGradient(cx, cy, 2, cx, cy, r);
+    g.addColorStop(0, `rgba(255, 252, 246, ${(0.18 * edgeFade).toFixed(3)})`);
+    g.addColorStop(0.55, `rgba(255, 248, 238, ${(0.07 * edgeFade).toFixed(3)})`);
+    g.addColorStop(1, 'rgba(255, 248, 238, 0)');
     clctx.fillStyle = g;
     clctx.beginPath();
     clctx.arc(cx, cy, r, 0, Math.PI * 2);
@@ -659,9 +753,8 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
   }
   const cloudLayerMap = new THREE.CanvasTexture(cloudCanvas);
   cloudLayerMap.colorSpace = THREE.SRGBColorSpace;
-  cloudLayerMap.wrapS = THREE.RepeatWrapping;
-  cloudLayerMap.wrapT = THREE.RepeatWrapping;
-  cloudLayerMap.repeat.set(3, 3);
+  cloudLayerMap.wrapS = THREE.ClampToEdgeWrapping;
+  cloudLayerMap.wrapT = THREE.ClampToEdgeWrapping;
 
   // ============================================================================
   // 10. Live 1st-Person Instrument Cluster & Live GPS Navigation Map Canvases
@@ -686,16 +779,21 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
 
   let lastCabinRedrawMs = -1000;
 
-  const updateCabinDisplays = (state: TruckPhysicsState, traffic: TrafficVehicle[]) => {
+  const updateCabinDisplays = (
+    state: TruckPhysicsState,
+    traffic: TrafficVehicle[],
+    isCabinActive = true
+  ) => {
     const now = performance.now();
-    if (now - lastCabinRedrawMs < 75) return;
+    // Smart CPU optimization: redraw at ~15Hz in 1st-person cabin view, or once every 650ms in exterior views
+    const minIntervalMs = isCabinActive ? 70 : 650;
+    if (now - lastCabinRedrawMs < minIntervalMs) return;
     lastCabinRedrawMs = now;
 
     // --- A. Redraw High-Res 1st-Person Instrument Cluster (1024x512) ---
     dctx.fillStyle = '#070a10';
     dctx.fillRect(0, 0, 1024, 512);
 
-    // Subtle carbon bezel frame
     dctx.strokeStyle = '#1e293b';
     dctx.lineWidth = 8;
     dctx.strokeRect(8, 8, 1008, 496);
@@ -711,7 +809,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
       currentVal: number,
       isRpm: boolean
     ) => {
-      // Outer metallic ring
       const ringGrad = dctx.createRadialGradient(cx, cy, r - 12, cx, cy, r + 8);
       ringGrad.addColorStop(0, '#0f172a');
       ringGrad.addColorStop(0.7, '#475569');
@@ -722,27 +819,36 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
       dctx.arc(cx, cy, r, 0, Math.PI * 2);
       dctx.stroke();
 
-      // Dial face
       dctx.fillStyle = '#0b111e';
       dctx.beginPath();
       dctx.arc(cx, cy, r - 6, 0, Math.PI * 2);
       dctx.fill();
 
-      // Economy / Redline zones for Tachometer
       if (isRpm) {
         dctx.strokeStyle = '#10b981';
         dctx.lineWidth = 14;
         dctx.beginPath();
-        dctx.arc(cx, cy, r - 18, Math.PI * 0.75 + 0.42 * Math.PI * 1.5, Math.PI * 0.75 + 0.68 * Math.PI * 1.5);
+        dctx.arc(
+          cx,
+          cy,
+          r - 18,
+          Math.PI * 0.75 + 0.42 * Math.PI * 1.5,
+          Math.PI * 0.75 + 0.68 * Math.PI * 1.5
+        );
         dctx.stroke();
 
         dctx.strokeStyle = '#ef4444';
         dctx.beginPath();
-        dctx.arc(cx, cy, r - 18, Math.PI * 0.75 + 0.84 * Math.PI * 1.5, Math.PI * 0.75 + 1.0 * Math.PI * 1.5);
+        dctx.arc(
+          cx,
+          cy,
+          r - 18,
+          Math.PI * 0.75 + 0.84 * Math.PI * 1.5,
+          Math.PI * 0.75 + 1.0 * Math.PI * 1.5
+        );
         dctx.stroke();
       }
 
-      // Tick marks & numbers
       dctx.textAlign = 'center';
       dctx.textBaseline = 'middle';
       for (let v = 0; v <= maxVal; v += step / 2) {
@@ -766,7 +872,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
         }
       }
 
-      // Labels
       dctx.fillStyle = '#94a3b8';
       dctx.font = '700 20px "Plus Jakarta Sans", sans-serif';
       dctx.fillText(title, cx, cy + 56);
@@ -774,7 +879,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
       dctx.font = '700 18px "JetBrains Mono", monospace';
       dctx.fillText(unit, cx, cy + 84);
 
-      // Glowing Swept Needle on Canvas
       const clampedFrac = Math.max(0, Math.min(1, currentVal / maxVal));
       const needleAng = Math.PI * 0.75 + clampedFrac * Math.PI * 1.5;
       dctx.save();
@@ -790,7 +894,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
       dctx.fill();
       dctx.restore();
 
-      // Center needle cap
       dctx.fillStyle = '#334155';
       dctx.beginPath();
       dctx.arc(cx, cy, 18, 0, Math.PI * 2);
@@ -807,9 +910,10 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     dctx.lineWidth = 3;
     dctx.strokeRect(434, 48, 156, 416);
 
-    // Top Turn Indicator & High Beam Telltales
-    const leftOn = state.indicatorBlinkOn && (state.indicator === 'left' || state.indicator === 'hazard');
-    const rightOn = state.indicatorBlinkOn && (state.indicator === 'right' || state.indicator === 'hazard');
+    const leftOn =
+      state.indicatorBlinkOn && (state.indicator === 'left' || state.indicator === 'hazard');
+    const rightOn =
+      state.indicatorBlinkOn && (state.indicator === 'right' || state.indicator === 'hazard');
     dctx.fillStyle = leftOn ? '#22c55e' : '#1e293b';
     dctx.font = '700 34px "JetBrains Mono", monospace';
     dctx.textAlign = 'center';
@@ -819,21 +923,43 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
 
     dctx.fillStyle = state.highBeamOn ? '#38bdf8' : state.headlightsOn ? '#4ade80' : '#334155';
     dctx.font = '700 18px "JetBrains Mono", monospace';
-    dctx.fillText(state.highBeamOn ? 'HIGH BEAM' : state.headlightsOn ? 'LOW BEAM' : 'LIGHTS OFF', 512, 82);
+    dctx.fillText(
+      state.highBeamOn ? 'HIGH BEAM' : state.headlightsOn ? 'LOW BEAM' : 'LIGHTS OFF',
+      512,
+      82
+    );
 
-    // Current Gear Readout Box
     dctx.fillStyle = '#1e293b';
     dctx.fillRect(450, 108, 124, 96);
     dctx.fillStyle = '#f59e0b';
     dctx.font = '700 54px "Chakra Petch", sans-serif';
-    const gearLabels = ['R2', 'R1', 'N', '1L', '1H', '2L', '2H', '3L', '3H', '4L', '4H', '5L', '5H', '6L', '6H'];
+    const gearLabels = [
+      'R2',
+      'R1',
+      'N',
+      '1L',
+      '1H',
+      '2L',
+      '2H',
+      '3L',
+      '3H',
+      '4L',
+      '4H',
+      '5L',
+      '5H',
+      '6L',
+      '6H',
+    ];
     const gearStr = gearLabels[state.gearIndex + 2] || 'N';
     dctx.fillText(gearStr, 512, 160);
     dctx.fillStyle = '#94a3b8';
     dctx.font = '700 15px "JetBrains Mono", monospace';
-    dctx.fillText(state.transmissionMode === 'auto' ? 'OPTICRUISE AUTO' : 'MANUAL SPLIT', 512, 192);
+    dctx.fillText(
+      state.transmissionMode === 'auto' ? 'OPTICRUISE AUTO' : 'MANUAL SPLIT',
+      512,
+      192
+    );
 
-    // Digital Speed & Air Brake PSI
     dctx.fillStyle = '#f8fafc';
     dctx.font = '700 36px "JetBrains Mono", monospace';
     dctx.fillText(`${Math.round(state.speedKmh)}`, 512, 248);
@@ -841,7 +967,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     dctx.font = '600 14px "Plus Jakarta Sans", sans-serif';
     dctx.fillText('KM/H DIGITAL', 512, 274);
 
-    // Air Pressure Bar
     dctx.fillStyle = state.airPressurePsi < 75 ? '#ef4444' : '#38bdf8';
     dctx.font = '700 20px "JetBrains Mono", monospace';
     dctx.fillText(`AIR ${Math.round(state.airPressurePsi)} PSI`, 512, 318);
@@ -850,7 +975,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     dctx.fillStyle = state.airPressurePsi < 75 ? '#ef4444' : '#38bdf8';
     dctx.fillRect(452, 334, Math.min(120, (state.airPressurePsi / 120) * 120), 12);
 
-    // Fuel & Odometer
     dctx.fillStyle = '#fbbf24';
     dctx.font = '700 18px "JetBrains Mono", monospace';
     dctx.fillText(`FUEL ${Math.round(state.fuelLiters)}L`, 512, 378);
@@ -863,7 +987,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     gpsCtx.fillStyle = '#0b1520';
     gpsCtx.fillRect(0, 0, 512, 384);
 
-    // Map grid lines
     gpsCtx.strokeStyle = 'rgba(56, 189, 248, 0.12)';
     gpsCtx.lineWidth = 1;
     for (let x = 0; x < 512; x += 48) {
@@ -879,7 +1002,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
       gpsCtx.stroke();
     }
 
-    // Draw NH-44 Highway Corridor Ribbon ahead & behind player
     const curS = state.distanceAlongHighwayM;
     const curSample = getRoadPointAtDistance(curS);
     const mapCenterX = 256;
@@ -899,12 +1021,10 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     }
     gpsCtx.stroke();
 
-    // Highlight active route spline in cyan/emerald
     gpsCtx.strokeStyle = '#10b981';
     gpsCtx.lineWidth = 6;
     gpsCtx.stroke();
 
-    // Draw nearby AI traffic vehicles on GPS radar
     for (const tv of traffic) {
       const ds = tv.s - curS;
       if (ds > -110 && ds < 300) {
@@ -915,7 +1035,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
       }
     }
 
-    // Player Truck Chevron at mapCenter
     gpsCtx.fillStyle = '#f97316';
     gpsCtx.beginPath();
     gpsCtx.moveTo(mapCenterX, mapCenterY - 14);
@@ -925,7 +1044,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     gpsCtx.closePath();
     gpsCtx.fill();
 
-    // Top Navigation Banner
     gpsCtx.fillStyle = '#065f46';
     gpsCtx.fillRect(0, 0, 512, 68);
     gpsCtx.fillStyle = '#facc15';
@@ -959,8 +1077,7 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     gpsNavMap.needsUpdate = true;
   };
 
-  // Run initial draw so Frame 1 cabin gauges & GPS are populated immediately
-  updateCabinDisplays(createInitialTruckState(60), []);
+  updateCabinDisplays(createInitialTruckState(60), [], true);
 
   // ============================================================================
   // 11. NHAI Green Overhead Highway Gantry Signboard & Milestone Generators
@@ -977,7 +1094,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     c.height = 256;
     const ctx = c.getContext('2d')!;
 
-    // Authentic reflective NHAI highway emerald green with micro-grid retro-reflective sheen
     const bgGrad = ctx.createLinearGradient(0, 0, 0, 256);
     bgGrad.addColorStop(0, '#047857');
     bgGrad.addColorStop(0.5, '#065f46');
@@ -989,7 +1105,6 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     ctx.lineWidth = 10;
     ctx.strokeRect(12, 12, 1000, 232);
 
-    // Yellow NH-44 Highway Shield Badge on Left
     ctx.fillStyle = '#facc15';
     ctx.fillRect(36, 36, 148, 184);
     ctx.strokeStyle = '#18181b';
@@ -1002,18 +1117,15 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     ctx.font = '700 56px "Chakra Petch", sans-serif';
     ctx.fillText(routeBadge, 110, 162);
 
-    // Primary Destination Headline
     ctx.textAlign = 'left';
     ctx.fillStyle = '#ffffff';
     ctx.font = '700 48px "Plus Jakarta Sans", sans-serif';
     ctx.fillText(titleEn, 215, 94);
 
-    // Hindi Devanagari Sub-line
     ctx.fillStyle = '#fde047';
     ctx.font = '600 34px "Plus Jakarta Sans", sans-serif';
     ctx.fillText(titleHi, 215, 148);
 
-    // Lane Guidance Arrows & Distances
     ctx.fillStyle = '#e2e8f0';
     ctx.font = '700 30px "JetBrains Mono", monospace';
     ctx.fillText(`↓ ${subLeft}`, 215, 210);
@@ -1051,7 +1163,7 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     return tex;
   };
 
-  return {
+  const textureSet: HighwayTextureSet = {
     asphaltMap,
     asphaltNormalMap,
     asphaltRoughnessMap,
@@ -1072,8 +1184,32 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     cloudLayerMap,
     dashboardClusterMap,
     gpsNavMap,
+    isUltra4KUpgraded: false,
+    upgradeToUltra4K: (ultraAnisotropy: number) => {
+      if (textureSet.isUltra4KUpgraded) return;
+      textureSet.isUltra4KUpgraded = true;
+
+      // Upgrade Highway Asphalt & Container Livery to UHD resolution with 65,000 micro-aggregate grains
+      asphaltCanvas.width = 2048;
+      asphaltCanvas.height = 2048;
+      paintAsphaltCanvas(asphaltCanvas, 65000);
+      asphaltMap.anisotropy = ultraAnisotropy;
+      asphaltMap.needsUpdate = true;
+
+      contCanvas.width = 2048;
+      contCanvas.height = 1024;
+      paintContainerSideCanvas(contCanvas);
+      containerSideMap.anisotropy = ultraAnisotropy;
+      containerSideMap.needsUpdate = true;
+
+      concreteMap.anisotropy = ultraAnisotropy;
+      terrainMap.anisotropy = ultraAnisotropy;
+      guardrailMap.anisotropy = ultraAnisotropy;
+    },
     updateCabinDisplays,
     createGantrySignTexture,
     createMilestoneTexture,
   };
+
+  return textureSet;
 }

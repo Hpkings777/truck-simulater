@@ -5,7 +5,7 @@ import { GeospatialStatus } from '../world/geospatialTiles';
 export type GameLifecycleState = 'title' | 'playing' | 'paused' | 'gameover';
 export type CameraViewMode = 'chase' | 'cabin' | 'orbit';
 export type TimeOfDayPreset = 'golden' | 'day' | 'night';
-export type GraphicsQuality = 'high' | 'balanced';
+export type GraphicsQuality = 'low' | 'medium' | 'high' | 'ultra';
 
 export interface RunOutcomeSnapshot {
   victory: boolean;
@@ -35,7 +35,7 @@ interface SimulatorHUDProps {
   onReturnToTitle: () => void;
   onCycleCamera: (mode?: CameraViewMode) => void;
   onCycleTimeOfDay: (preset?: TimeOfDayPreset) => void;
-  onToggleGraphicsQuality: () => void;
+  onToggleGraphicsQuality: (preset?: GraphicsQuality) => void;
   onToggleMute: () => void;
   onToggleHeadlights: () => void;
   onToggleIndicator: (target: IndicatorState) => void;
@@ -217,6 +217,36 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
 
             <div>
               <div className="text-xs font-semibold text-stone-400 mb-1.5">
+                Graphics Quality Preset (Pixel-Perfect 3D · 60 FPS Optimised)
+              </div>
+              <div className="grid grid-cols-4 gap-2">
+                {(
+                  [
+                    { id: 'low', label: 'Low (Default)' },
+                    { id: 'medium', label: 'Medium' },
+                    { id: 'high', label: 'High' },
+                    { id: 'ultra', label: 'Ultra 4K' },
+                  ] as const
+                ).map((tier) => (
+                  <button
+                    key={tier.id}
+                    type="button"
+                    data-testid={`gfx-btn-${tier.id}`}
+                    onClick={() => onToggleGraphicsQuality(tier.id)}
+                    className={`py-2 px-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                      graphicsQuality === tier.id
+                        ? 'bg-amber-500 text-stone-950 shadow-sm'
+                        : 'bg-stone-900 text-stone-300 hover:bg-stone-800 border border-stone-800'
+                    }`}
+                  >
+                    {tier.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <div className="text-xs font-semibold text-stone-400 mb-1.5">
                 12-Speed Gearbox Mode
               </div>
               <div className="grid grid-cols-2 gap-2">
@@ -329,6 +359,25 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
 
         {/* Top-Right: Compact Square SVG Utility Buttons */}
         <div className="pointer-events-auto flex items-center gap-1.5">
+          <button
+            type="button"
+            tabIndex={-1}
+            data-testid="hud-gfx-cycle-btn"
+            aria-label={`Cycle Graphics Quality (Current: ${graphicsQuality})`}
+            onClick={blurAndCall(() => onToggleGraphicsQuality())}
+            className="h-10 px-2.5 bg-stone-950/88 hover:bg-stone-900 border border-stone-800 rounded-lg flex items-center gap-1.5 text-xs font-semibold text-stone-200 transition-colors cursor-pointer whitespace-nowrap"
+            title="Cycle Graphics Quality Preset [F] (Low / Med / High / Ultra 4K)"
+          >
+            <span className="text-[10px] text-stone-400 font-mono-tabular">GFX</span>
+            <span className="uppercase text-amber-400 font-mono-tabular">
+              {graphicsQuality === 'medium'
+                ? 'MED'
+                : graphicsQuality === 'ultra'
+                  ? 'ULTRA 4K'
+                  : graphicsQuality}
+            </span>
+          </button>
+
           <button
             type="button"
             tabIndex={-1}
@@ -719,16 +768,37 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
             </div>
 
             {/* Settings & Geospatial Status Inspector */}
-            <div className="space-y-2.5 mb-6 text-xs">
-              <div className="flex items-center justify-between py-2 border-y border-stone-800">
-                <span className="text-stone-300">Render Detail Preset</span>
-                <button
-                  type="button"
-                  onClick={onToggleGraphicsQuality}
-                  className="px-3 py-1 bg-stone-900 hover:bg-stone-800 border border-stone-700 rounded font-semibold text-amber-400 uppercase cursor-pointer"
-                >
-                  {graphicsQuality}
-                </button>
+            <div className="space-y-3 mb-6 text-xs">
+              <div className="py-2.5 border-y border-stone-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-stone-300 font-semibold">Graphics Quality Tier</span>
+                  <span className="text-[11px] font-mono-tabular text-amber-400 uppercase">
+                    {graphicsQuality === 'ultra' ? 'Ultra 4K UHD' : graphicsQuality}
+                  </span>
+                </div>
+                <div className="grid grid-cols-4 gap-1.5">
+                  {(
+                    [
+                      { id: 'low', label: 'Low' },
+                      { id: 'medium', label: 'Med' },
+                      { id: 'high', label: 'High' },
+                      { id: 'ultra', label: 'Ultra 4K' },
+                    ] as const
+                  ).map((tier) => (
+                    <button
+                      key={tier.id}
+                      type="button"
+                      onClick={() => onToggleGraphicsQuality(tier.id)}
+                      className={`py-1.5 px-2 rounded font-semibold uppercase transition-colors cursor-pointer ${
+                        graphicsQuality === tier.id
+                          ? 'bg-amber-500 text-stone-950'
+                          : 'bg-stone-900 hover:bg-stone-800 border border-stone-700 text-stone-300'
+                      }`}
+                    >
+                      {tier.label}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div className="p-2.5 bg-stone-900/80 border border-stone-800 rounded-lg text-[11px] text-stone-400 leading-relaxed">
                 <div className="font-semibold text-stone-300 mb-0.5">

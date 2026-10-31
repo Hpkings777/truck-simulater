@@ -76,7 +76,8 @@ export default function App() {
   const [telemetry, setTelemetry] = useState<TruckPhysicsState>(() => createInitialTruckState(60));
   const [cameraMode, setCameraMode] = useState<CameraViewMode>('chase');
   const [timeOfDay, setTimeOfDay] = useState<TimeOfDayPreset>('golden');
-  const [graphicsQuality, setGraphicsQuality] = useState<GraphicsQuality>('high');
+  // Default graphics tier is 'low' — pixel-perfect 3D geometry & textures with 60 FPS low-end optimizations
+  const [graphicsQuality, setGraphicsQuality] = useState<GraphicsQuality>('low');
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [hudCollapsed, setHudCollapsed] = useState<boolean>(false);
   const [isTouchDevice, setIsTouchDevice] = useState<boolean>(false);
@@ -89,6 +90,7 @@ export default function App() {
   const gameStateRef = useRef<GameLifecycleState>(initialAutostart ? 'playing' : 'title');
   const cameraModeRef = useRef<CameraViewMode>('chase');
   const timeOfDayRef = useRef<TimeOfDayPreset>('golden');
+  const graphicsQualityRef = useRef<GraphicsQuality>('low');
   const physicsRef = useRef<TruckPhysicsState>(createInitialTruckState(60));
   const trafficRef = useRef<TrafficVehicle[]>(createInitialTrafficFleet(60));
   const audioRef = useRef<TruckAudioEngine | null>(null);
@@ -221,8 +223,13 @@ export default function App() {
     setTelemetry({ ...physicsRef.current });
   }, []);
 
-  const handleToggleGraphicsQuality = useCallback(() => {
-    setGraphicsQuality((prev) => (prev === 'high' ? 'balanced' : 'high'));
+  const handleToggleGraphicsQuality = useCallback((explicitPreset?: GraphicsQuality) => {
+    const order: GraphicsQuality[] = ['low', 'medium', 'high', 'ultra'];
+    const next =
+      explicitPreset ??
+      order[(order.indexOf(graphicsQualityRef.current) + 1) % order.length];
+    graphicsQualityRef.current = next;
+    setGraphicsQuality(next);
   }, []);
 
   const handleToggleMute = useCallback(() => {
@@ -304,28 +311,28 @@ export default function App() {
     });
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.04;
-    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
+    renderer.toneMappingExposure = 0.88;
+    renderer.setPixelRatio(1); // Default 'low' starts at crisp 1.0 pixel ratio for zero lag
     renderer.setSize(initW, initH);
-    renderer.shadowMap.enabled = !isSoftwareGl;
+    renderer.shadowMap.enabled = false;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     container.innerHTML = '';
     container.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(62, initW / initH, 0.16, 1100);
+    const camera = new THREE.PerspectiveCamera(62, initW / initH, 0.16, 1150);
 
-    // Optional Post-Processing Pipeline (RenderPass + UnrealBloomPass + OutputPass on hardware GPUs)
+    // Optional Post-Processing Pipeline (Active ONLY in 'ultra' mode on hardware GPUs, with high threshold 1.55 so sky never blooms!)
     let composer: EffectComposer | null = null;
     if (!isSoftwareGl) {
       composer = new EffectComposer(renderer);
       composer.addPass(new RenderPass(scene, camera));
       const bloomPass = new UnrealBloomPass(
-        new THREE.Vector2(initW, initH),
-        0.22, // Subtle optical bloom on sun horizon, headlights & gauges
-        0.45,
-        0.86
+        new THREE.Vector2(Math.round(initW * 0.5), Math.round(initH * 0.5)),
+        0.12, // Subtle optical bloom restricted strictly to HDR emissive vehicle lamps
+        0.25,
+        1.55 // Above Sky shader luminance (~1.1) so sky/horizon/road never wash out!
       );
       composer.addPass(bloomPass);
       composer.addPass(new OutputPass());
@@ -338,19 +345,19 @@ export default function App() {
 
     // 3. Physical Rayleigh & Mie Atmospheric Scattering Sky (`Sky` shader dome)
     const sky = new Sky();
-    sky.scale.setScalar(2200);
+    sky.scale.setScalar(2400);
     scene.add(sky);
     const skyUniforms = sky.material.uniforms;
 
-    // 4. Warm/Cool 3-Point Outdoor Highway Lighting Rig & Horizon Fog
-    const hemiLight = new THREE.HemisphereLight(0xfde68a, 0x44403c, 0.85);
+    // 4. Warm/Cool 3-Point Outdoor Highway Lighting Rig & Crystal-Clear Distance Fog
+    const hemiLight = new THREE.HemisphereLight(0xfde68a, 0x44403c, 0.88);
     hemiLight.position.set(0, 120, 0);
     scene.add(hemiLight);
 
-    const sunLight = new THREE.DirectionalLight(0xffedd5, 2.4);
+    const sunLight = new THREE.DirectionalLight(0xffedd5, 2.25);
     sunLight.position.set(-85, 68, -60);
     if (!isSoftwareGl) {
-      sunLight.castShadow = true;
+      sunLight.castShadow = false; // Enabled dynamically on Medium/High/Ultra
       sunLight.shadow.mapSize.width = 1024;
       sunLight.shadow.mapSize.height = 1024;
       sunLight.shadow.camera.near = 5;
@@ -366,27 +373,30 @@ export default function App() {
     scene.add(sunLight);
     scene.add(sunLight.target);
 
-    const fogColor = new THREE.Color(0xdca87c);
+    // Linear distance fog starting at 340m so 0m..340m ahead of the truck is 100% crystal-clear!
+    const fogColor = new THREE.Color(0xd5a782);
     scene.background = fogColor;
-    scene.fog = new THREE.FogExp2(fogColor.getHex(), 0.00145);
+    const linearFog = new THREE.Fog(fogColor.getHex(), 340, 1180);
+    scene.fog = linearFog;
 
     // 5. Build Procedural PBR Textures, NH-44 Highway Environment, Player Rig & AI Traffic
     const maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
-    const textures = createHighwayTextureSet(maxAnisotropy);
+    const textures = createHighwayTextureSet(Math.min(4, maxAnisotropy));
 
-    // High-altitude atmospheric cirrus/cumulus cloud canopy plane
+    // High-altitude atmospheric cirrus cloud canopy plane (with fog: false so it never turns into a fog ceiling!)
     const cloudPlane = new THREE.Mesh(
-      new THREE.PlaneGeometry(2400, 2400),
+      new THREE.PlaneGeometry(2200, 2200),
       new THREE.MeshBasicMaterial({
         map: textures.cloudLayerMap,
         transparent: true,
-        opacity: 0.72,
+        opacity: 0.48,
         depthWrite: false,
+        fog: false,
         side: THREE.DoubleSide,
       })
     );
     cloudPlane.rotation.x = Math.PI / 2;
-    cloudPlane.position.y = 215;
+    cloudPlane.position.y = 240;
     scene.add(cloudPlane);
 
     const envHandles: HighwayEnvironmentHandles = buildHighwayEnvironment(textures, isSoftwareGl);
@@ -402,12 +412,12 @@ export default function App() {
       magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat,
     });
-    const mirrorCamera = new THREE.PerspectiveCamera(44, 0.5, 0.4, 240);
+    const mirrorCamera = new THREE.PerspectiveCamera(44, 0.5, 0.4, 180);
     const mirrorMat = new THREE.MeshBasicMaterial({ map: mirrorRenderTarget.texture });
     playerRig.rightMirrorMesh.material = mirrorMat;
     playerRig.leftMirrorMesh.material = mirrorMat;
 
-    // Build high-detail 3D meshes for the 24 AI Traffic Vehicles
+    // Build high-detail 3D meshes for the 24 AI Traffic Vehicles (using cached geometries)
     const trafficMeshes: { root: THREE.Group; brakeMat: THREE.MeshBasicMaterial }[] = [];
     for (const tv of trafficRef.current) {
       const tm = buildTrafficVehicleMesh(tv.archetype, tv.colorHex, textures);
@@ -415,59 +425,139 @@ export default function App() {
       trafficMeshes.push(tm);
     }
 
-    // Apply Time-of-Day Physical Sky & Lighting Preset
+    // Dynamic 4-Tier Graphics Quality Configurator ('low' | 'medium' | 'high' | 'ultra')
+    let lastAppliedTier: GraphicsQuality | null = null;
+    let activeTrafficCullDist = 380;
+    let activeMirrorInterval = 4;
+
+    const syncGraphicsTier = (tier: GraphicsQuality) => {
+      if (lastAppliedTier === tier) return;
+      lastAppliedTier = tier;
+
+      const w = container.clientWidth || window.innerWidth;
+      const h = container.clientHeight || window.innerHeight;
+      const dpr = window.devicePixelRatio || 1;
+
+      if (tier === 'low') {
+        renderer.setPixelRatio(1);
+        renderer.setSize(w, h);
+        renderer.shadowMap.enabled = false;
+        sunLight.castShadow = false;
+        camera.far = 920;
+        camera.updateProjectionMatrix();
+        mirrorCamera.far = 115;
+        mirrorCamera.updateProjectionMatrix();
+        activeTrafficCullDist = 360;
+        activeMirrorInterval = 4;
+      } else if (tier === 'medium') {
+        renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(dpr, 1.25));
+        renderer.setSize(w, h);
+        renderer.shadowMap.enabled = !isSoftwareGl;
+        sunLight.castShadow = !isSoftwareGl;
+        if (!isSoftwareGl && sunLight.shadow.mapSize.width !== 1024) {
+          sunLight.shadow.mapSize.set(1024, 1024);
+          sunLight.shadow.map?.dispose();
+          sunLight.shadow.map = null;
+        }
+        camera.far = 1020;
+        camera.updateProjectionMatrix();
+        mirrorCamera.far = 155;
+        mirrorCamera.updateProjectionMatrix();
+        activeTrafficCullDist = 440;
+        activeMirrorInterval = 3;
+      } else if (tier === 'high') {
+        renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(dpr, 1.65));
+        renderer.setSize(w, h);
+        renderer.shadowMap.enabled = !isSoftwareGl;
+        sunLight.castShadow = !isSoftwareGl;
+        if (!isSoftwareGl && sunLight.shadow.mapSize.width !== 2048) {
+          sunLight.shadow.mapSize.set(2048, 2048);
+          sunLight.shadow.map?.dispose();
+          sunLight.shadow.map = null;
+        }
+        camera.far = 1120;
+        camera.updateProjectionMatrix();
+        mirrorCamera.far = 200;
+        mirrorCamera.updateProjectionMatrix();
+        activeTrafficCullDist = 520;
+        activeMirrorInterval = 2;
+      } else {
+        // ULTRA 4K UHD Tier
+        textures.upgradeToUltra4K(maxAnisotropy);
+        renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(dpr, 2.0));
+        renderer.setSize(w, h);
+        composer?.setSize(w, h);
+        renderer.shadowMap.enabled = !isSoftwareGl;
+        sunLight.castShadow = !isSoftwareGl;
+        if (!isSoftwareGl && sunLight.shadow.mapSize.width !== 2048) {
+          sunLight.shadow.mapSize.set(2048, 2048);
+          sunLight.shadow.map?.dispose();
+          sunLight.shadow.map = null;
+        }
+        camera.far = 1250;
+        camera.updateProjectionMatrix();
+        mirrorCamera.far = 250;
+        mirrorCamera.updateProjectionMatrix();
+        activeTrafficCullDist = 680;
+        activeMirrorInterval = 1;
+      }
+    };
+
+    // Apply Time-of-Day Physical Sky & Crystal-Clear Linear Fog Preset
     let lastAppliedPreset: TimeOfDayPreset | null = null;
     const applyLightingPreset = (preset: TimeOfDayPreset, truckZ: number) => {
       sky.position.set(0, 0, truckZ);
-      cloudPlane.position.z = truckZ - 200;
+      cloudPlane.position.z = truckZ - 180;
 
       if (preset === 'golden') {
         if (lastAppliedPreset !== preset) {
-          skyUniforms['turbidity'].value = 8.5;
-          skyUniforms['rayleigh'].value = 2.4;
-          skyUniforms['mieCoefficient'].value = 0.008;
-          skyUniforms['mieDirectionalG'].value = 0.84;
-          const phi = THREE.MathUtils.degToRad(90 - 9.5);
+          skyUniforms['turbidity'].value = 4.6;
+          skyUniforms['rayleigh'].value = 1.85;
+          skyUniforms['mieCoefficient'].value = 0.0045;
+          skyUniforms['mieDirectionalG'].value = 0.78;
+          const phi = THREE.MathUtils.degToRad(90 - 14.5);
           const theta = THREE.MathUtils.degToRad(205);
           _sunDir.setFromSphericalCoords(1, phi, theta);
           skyUniforms['sunPosition'].value.copy(_sunDir);
 
-          fogColor.setHex(0xdca87c);
+          fogColor.setHex(0xd5a782);
           hemiLight.color.setHex(0xfde68a);
           hemiLight.groundColor.setHex(0x44403c);
-          hemiLight.intensity = 0.86;
-          sunLight.color.setHex(0xffb870);
-          sunLight.intensity = 2.35;
-          renderer.toneMappingExposure = 0.96;
+          hemiLight.intensity = 0.88;
+          sunLight.color.setHex(0xffbe78);
+          sunLight.intensity = 2.2;
+          renderer.toneMappingExposure = 0.88;
           envHandles.streetLightHeadsMat.color.setHex(0xfef08a);
           cloudPlane.visible = true;
           sky.visible = true;
-          if (scene.fog instanceof THREE.FogExp2) scene.fog.density = 0.00145;
+          linearFog.near = 350;
+          linearFog.far = 1180;
           lastAppliedPreset = preset;
         }
-        sunLight.position.set(-110, 52, truckZ - 140);
+        sunLight.position.set(-110, 56, truckZ - 140);
       } else if (preset === 'day') {
         if (lastAppliedPreset !== preset) {
-          skyUniforms['turbidity'].value = 3.2;
-          skyUniforms['rayleigh'].value = 1.35;
-          skyUniforms['mieCoefficient'].value = 0.004;
-          skyUniforms['mieDirectionalG'].value = 0.78;
-          const phi = THREE.MathUtils.degToRad(90 - 42);
+          skyUniforms['turbidity'].value = 2.6;
+          skyUniforms['rayleigh'].value = 1.25;
+          skyUniforms['mieCoefficient'].value = 0.003;
+          skyUniforms['mieDirectionalG'].value = 0.75;
+          const phi = THREE.MathUtils.degToRad(90 - 44);
           const theta = THREE.MathUtils.degToRad(160);
           _sunDir.setFromSphericalCoords(1, phi, theta);
           skyUniforms['sunPosition'].value.copy(_sunDir);
 
-          fogColor.setHex(0xa5d8ff);
+          fogColor.setHex(0x9bd2fc);
           hemiLight.color.setHex(0xe0f2fe);
           hemiLight.groundColor.setHex(0x57534e);
-          hemiLight.intensity = 0.98;
+          hemiLight.intensity = 0.96;
           sunLight.color.setHex(0xffffff);
-          sunLight.intensity = 2.4;
-          renderer.toneMappingExposure = 0.98;
+          sunLight.intensity = 2.25;
+          renderer.toneMappingExposure = 0.9;
           envHandles.streetLightHeadsMat.color.setHex(0x94a3b8);
           cloudPlane.visible = true;
           sky.visible = true;
-          if (scene.fog instanceof THREE.FogExp2) scene.fog.density = 0.0012;
+          linearFog.near = 380;
+          linearFog.far = 1220;
           lastAppliedPreset = preset;
         }
         sunLight.position.set(65, 140, truckZ - 60);
@@ -477,25 +567,25 @@ export default function App() {
           fogColor.setHex(0x060a14);
           hemiLight.color.setHex(0x1e293b);
           hemiLight.groundColor.setHex(0x090d16);
-          hemiLight.intensity = 0.22;
+          hemiLight.intensity = 0.25;
           sunLight.color.setHex(0x38bdf8);
-          sunLight.intensity = 0.25;
-          renderer.toneMappingExposure = 0.95;
+          sunLight.intensity = 0.28;
+          renderer.toneMappingExposure = 0.92;
           envHandles.streetLightHeadsMat.color.setHex(0xfef08a);
           cloudPlane.visible = false;
           sky.visible = false;
-          if (scene.fog instanceof THREE.FogExp2) scene.fog.density = 0.0032;
+          linearFog.near = 240;
+          linearFog.far = 860;
           lastAppliedPreset = preset;
         }
         sunLight.position.set(-60, 80, truckZ - 80);
       }
       scene.background = fogColor;
-      if (scene.fog instanceof THREE.FogExp2) {
-        scene.fog.color.copy(fogColor);
-      }
+      linearFog.color.copy(fogColor);
     };
 
-    // Initialize camera immediately at the hero rig position so Frame 1 is never black
+    // Initialize camera and default graphics tier ('low') immediately
+    syncGraphicsTier(graphicsQualityRef.current);
     const initP = physicsRef.current;
     camera.position.set(initP.x + 7.5, initP.y + 3.1, initP.z - 8.2);
     camera.lookAt(initP.x - 0.5, initP.y + 2.0, initP.z + 2.5);
@@ -504,7 +594,6 @@ export default function App() {
       renderer.compile(scene, camera);
     }
 
-    // Audio Synthesizer Instance
     const audio = new TruckAudioEngine();
     audioRef.current = audio;
 
@@ -535,6 +624,7 @@ export default function App() {
         if (code === 'KeyC') handleCycleCamera();
         else if (code === 'KeyL') handleToggleHeadlights();
         else if (code === 'KeyT') handleCycleTimeOfDay();
+        else if (code === 'KeyF') handleToggleGraphicsQuality();
         else if (code === 'KeyM') handleToggleMute();
         else if (code === 'KeyR') handleRestartGame();
         else if (code === 'KeyU') setHudCollapsed((c) => !c);
@@ -644,6 +734,9 @@ export default function App() {
       const subSteps = isSoftwareGl && rawDt > 0.045 ? 2 : 1;
       const stepDt = Math.min(rawDt / subSteps, 0.045);
 
+      // Apply any Graphics Tier change immediately
+      syncGraphicsTier(graphicsQualityRef.current);
+
       const keys = keysHeldRef.current;
       const touch = touchHeldRef.current;
 
@@ -677,7 +770,6 @@ export default function App() {
         shiftUpQueuedRef.current = false;
         shiftDownQueuedRef.current = false;
 
-        // Check Haul Victory (reaching Karnal FASTag Toll Plaza at s >= 4350m) or Cargo Depletion
         if (pState.distanceAlongHighwayM >= 4350 || pState.cargoIntegrityPct <= 0) {
           const isVictory = pState.cargoIntegrityPct > 0;
           const elapsedSec = Math.max(1, (performance.now() - runStartTimeRef.current) / 1000);
@@ -705,7 +797,7 @@ export default function App() {
         stepTrafficSimulation(trafficRef.current, pState, stepDt);
       }
 
-      // Sync 3D Player Tractor, Cabin Suspension, Needles & Trailer Meshes
+      // Sync 3D Player Tractor, Cabin Suspension, Needles, Fan, Exhaust & Trailer Meshes
       syncPlayerRigMeshes(
         playerRig,
         pState,
@@ -714,24 +806,34 @@ export default function App() {
       );
 
       // Update Live 1st-Person Instrument Cluster & Center-Console GPS Navigation Screen
-      textures.updateCabinDisplays(pState, trafficRef.current);
+      textures.updateCabinDisplays(
+        pState,
+        trafficRef.current,
+        cameraModeRef.current === 'cabin'
+      );
 
-      // Sync 3D AI Traffic Meshes
+      // Sync 3D AI Traffic Meshes with Distance Culling for Zero-Lag Low-End Performance
       for (let i = 0; i < trafficRef.current.length; i++) {
         const tv = trafficRef.current[i];
         const tm = trafficMeshes[i];
-        tm.root.position.set(tv.x, tv.y, tv.z);
-        tm.root.rotation.set(tv.pitch, -tv.heading, -tv.roll, 'YXZ');
-        tm.brakeMat.color.setHex(tv.braking ? 0xff2222 : 0x7f1d1d);
+        const ds = tv.s - pState.distanceAlongHighwayM;
+        if (ds < -110 || ds > activeTrafficCullDist) {
+          tm.root.visible = false;
+        } else {
+          tm.root.visible = true;
+          tm.root.position.set(tv.x, tv.y, tv.z);
+          tm.root.rotation.set(tv.pitch, -tv.heading, -tv.roll, 'YXZ');
+          tm.brakeMat.color.setHex(tv.braking ? 0xff2222 : 0x7f1d1d);
+        }
       }
 
       // Update Sun, Physical Sky & Directional Shadow Frustum to follow Player Rig
       applyLightingPreset(timeOfDayRef.current, pState.z);
       sunLight.target.position.set(pState.x, pState.y, pState.z - 15);
-      textures.cloudLayerMap.offset.y = elapsedSimTime * 0.0025;
 
-      // Render Live Rear-View Wing Mirror when in 1st-Person Cabin View (or periodically)
-      if (cameraModeRef.current === 'cabin' && (!isSoftwareGl || frameCounter % 3 === 1)) {
+      // Render Live Rear-View Wing Mirror when in 1st-Person Cabin View
+      const mirrorPeriod = isSoftwareGl ? 3 : activeMirrorInterval;
+      if (cameraModeRef.current === 'cabin' && frameCounter % mirrorPeriod === 1) {
         playerRig.mirrorCameraAnchor.getWorldPosition(_mirrorWorldPos);
         const backX = -Math.sin(pState.heading);
         const backZ = Math.cos(pState.heading);
@@ -769,7 +871,6 @@ export default function App() {
         camera.position.copy(_camTargetPos);
         camera.lookAt(_camLookTarget);
       } else if (cameraModeRef.current === 'cabin') {
-        // 1st-Person Right-Hand-Drive Cabin Camera (inside driver seat looking through windshield, gauges, GPS & wing mirror)
         playerRig.cabinCameraAnchor.getWorldPosition(_cabinWorldPos);
         const fwdX = Math.sin(pState.heading);
         const fwdZ = -Math.cos(pState.heading);
@@ -843,7 +944,9 @@ export default function App() {
         setTelemetry({ ...pState });
       }
 
-      if (composer) {
+      // Render: Direct MSAA forward pass on Low/Med/High for zero post-processing lag,
+      // or high-threshold lamp-only bloom pass on Ultra!
+      if (composer && graphicsQualityRef.current === 'ultra') {
         composer.render();
       } else {
         renderer.render(scene, camera);
@@ -881,6 +984,7 @@ export default function App() {
     handleRestartGame,
     handleResumeGame,
     handleStartGame,
+    handleToggleGraphicsQuality,
     handleToggleHeadlights,
     handleToggleIndicator,
     handleToggleMute,
