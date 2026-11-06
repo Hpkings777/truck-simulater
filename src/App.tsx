@@ -20,7 +20,9 @@ import {
   TimeOfDayPreset,
 } from './components/SimulatorHUD';
 import {
+  applyTruckCollision,
   createInitialTruckState,
+  DamageZoneId,
   IndicatorState,
   stepTruckPhysics,
   TransmissionMode,
@@ -614,9 +616,10 @@ export default function App() {
     dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPositions, 3));
     const dustMat = new THREE.PointsMaterial({
       color: 0xfef3c7,
-      size: 0.14,
+      size: 2.0,
+      sizeAttenuation: false,
       transparent: true,
-      opacity: 0.42,
+      opacity: 0.35,
       depthWrite: false,
     });
     const dustParticles = new THREE.Points(dustGeo, dustMat);
@@ -860,6 +863,31 @@ export default function App() {
           shiftDownQueuedRef.current = true;
         } else if (code === 'KeyH') {
           physicsRef.current.hornActive = true;
+        } else if (code === 'KeyK') {
+          const zones: DamageZoneId[] = [
+            'front_left',
+            'front_center',
+            'front_right',
+            'side_left',
+            'side_right',
+            'rear',
+          ];
+          const nextZone = zones[physicsRef.current.collisionCount % zones.length];
+          const localPos =
+            nextZone === 'front_left'
+              ? { x: -0.95, y: 1.15, z: -2.76 }
+              : nextZone === 'front_right'
+                ? { x: 0.95, y: 1.15, z: -2.76 }
+                : nextZone === 'side_left'
+                  ? { x: -1.25, y: 1.4, z: -1.65 }
+                  : nextZone === 'side_right'
+                    ? { x: 1.25, y: 1.4, z: -1.65 }
+                    : nextZone === 'rear'
+                      ? { x: 0.0, y: 1.5, z: 5.85 }
+                      : { x: 0.0, y: 1.28, z: -2.78 };
+          physicsRef.current.collisionCooldownS = 0;
+          applyTruckCollision(physicsRef.current, nextZone, 0.58, localPos);
+          setTelemetry({ ...physicsRef.current });
         }
       }
 
@@ -1307,7 +1335,9 @@ export default function App() {
       audio.update(pState, gameStateRef.current === 'playing');
 
       const nowMs = performance.now();
-      if (nowMs - lastHudSyncTime > 95) {
+      const syncThresholdMs =
+        pState.impactFlashTimerS > 0.01 || pState.lightFlickerTimerS > 0.01 ? 35 : 95;
+      if (nowMs - lastHudSyncTime > syncThresholdMs) {
         lastHudSyncTime = nowMs;
         setTelemetry({ ...pState });
       }
@@ -1324,6 +1354,38 @@ export default function App() {
         frameId = requestAnimationFrame(tick);
       }
     }
+
+    const dbgWin = window as unknown as {
+      __simulateCollision?: (zone?: DamageZoneId, intensity?: number) => void;
+      __getTelemetryState?: () => TruckPhysicsState;
+      __setOrbitAngles?: (yaw: number, pitch: number, distance: number) => void;
+      __setCabinLook?: (yaw: number, pitch: number) => void;
+    };
+    dbgWin.__simulateCollision = (zone = 'front_left', intensity = 0.62) => {
+      const localPos =
+        zone === 'front_left'
+          ? { x: -0.95, y: 1.15, z: -2.76 }
+          : zone === 'front_right'
+            ? { x: 0.95, y: 1.15, z: -2.76 }
+            : zone === 'side_left'
+              ? { x: -1.25, y: 1.4, z: -1.65 }
+              : zone === 'side_right'
+                ? { x: 1.25, y: 1.4, z: -1.65 }
+                : zone === 'rear'
+                  ? { x: 0.0, y: 1.5, z: 5.85 }
+                  : { x: 0.0, y: 1.28, z: -2.78 };
+      physicsRef.current.collisionCooldownS = 0;
+      applyTruckCollision(physicsRef.current, zone, intensity, localPos);
+      setTelemetry({ ...physicsRef.current });
+    };
+    dbgWin.__getTelemetryState = () => physicsRef.current;
+    dbgWin.__setOrbitAngles = (yaw: number, pitch: number, distance: number) => {
+      orbitAnglesRef.current = { yaw, pitch, distance };
+      snapCameraRef.current = true;
+    };
+    dbgWin.__setCabinLook = (yaw: number, pitch: number) => {
+      cabinLookRef.current = { yaw, pitch };
+    };
 
     frameId = requestAnimationFrame(tick);
 

@@ -1119,15 +1119,55 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
       state.cargoIntegrityPct < 80 ? '#f59e0b' : '#4ade80'
     );
 
-    // 5. Bottom Digital Odometer & Milestone Readout (y=464, cleanly inside y=488 border)
+    // 5. Bottom Digital Odometer & Collision Damage Telltale (y=464, cleanly inside y=488 border)
     dctx.textAlign = 'center';
-    dctx.fillStyle = '#fde047';
-    dctx.font = '700 14.5px "JetBrains Mono", monospace';
-    dctx.fillText(
-      `${state.landmarkKm || 'NH-44'} · ODO ${(state.distanceAlongHighwayM / 1000).toFixed(2)} KM`,
-      512,
-      464
-    );
+    if (state.collisionCount > 0) {
+      const isFlickering = state.lightFlickerTimerS > 0.02 || state.hudGlitchTimerS > 0.02;
+      dctx.fillStyle = isFlickering ? '#ef4444' : '#7f1d1d';
+      dctx.fillRect(412, 446, 200, 32);
+      dctx.strokeStyle = '#f87171';
+      dctx.lineWidth = 1.5;
+      dctx.strokeRect(412, 446, 200, 32);
+      dctx.fillStyle = '#fef2f2';
+      dctx.font = '800 13px "JetBrains Mono", monospace';
+      const zoneShort = (state.lastCollisionZone || 'front_center')
+        .replace('front_', 'FR-')
+        .replace('side_', 'SD-')
+        .toUpperCase();
+      dctx.fillText(
+        isFlickering
+          ? `⚡ HIT #${state.collisionCount} [${zoneShort}] FLICKER`
+          : `DMG #${state.collisionCount} · ${zoneShort} · ENG ${Math.round(state.engineDamage * 100)}%`,
+        512,
+        463
+      );
+    } else {
+      dctx.fillStyle = '#fde047';
+      dctx.font = '700 14.5px "JetBrains Mono", monospace';
+      dctx.fillText(
+        `${state.landmarkKm || 'NH-44'} · ODO ${(state.distanceAlongHighwayM / 1000).toFixed(2)} KM`,
+        512,
+        464
+      );
+    }
+
+    // Temporary Electrical Voltage-Sag Flicker & Scanline Glitch on 3D Instrument Cluster
+    if (state.lightFlickerTimerS > 0.02 || state.hudGlitchTimerS > 0.02) {
+      const phase = state.lightFlickerTimerS * 43 + state.collisionCount * 2.1;
+      const sagAlpha =
+        Math.sin(phase) * Math.cos(phase * 1.9) < -0.1
+          ? 0.58
+          : state.hudGlitchTimerS > 0.05
+            ? 0.25
+            : 0.08;
+      dctx.fillStyle = `rgba(4, 6, 12, ${sagAlpha.toFixed(2)})`;
+      dctx.fillRect(8, 8, 1008, 496);
+
+      // Amber/Red Fault Arc Flash border
+      dctx.strokeStyle = 'rgba(239, 68, 68, 0.72)';
+      dctx.lineWidth = 6;
+      dctx.strokeRect(12, 12, 1000, 488);
+    }
 
     dashboardClusterMap.needsUpdate = true;
 
@@ -1195,7 +1235,7 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     }
 
     // Player Heavy Rig Chevron Icon
-    gpsCtx.fillStyle = '#f97316';
+    gpsCtx.fillStyle = state.impactFlashTimerS > 0.05 ? '#ef4444' : '#f97316';
     gpsCtx.beginPath();
     gpsCtx.moveTo(mapCenterX, mapCenterY - 16);
     gpsCtx.lineTo(mapCenterX + 12, mapCenterY + 11);
@@ -1203,6 +1243,41 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     gpsCtx.lineTo(mapCenterX - 12, mapCenterY + 11);
     gpsCtx.closePath();
     gpsCtx.fill();
+
+    // Live 6-Zone Truck Structural Diagnostics Mini-Pod on Radar Bottom-Left (when damaged)
+    if (state.collisionCount > 0 && state.zoneDamage) {
+      gpsCtx.fillStyle = 'rgba(15, 23, 42, 0.92)';
+      gpsCtx.strokeStyle = state.lightFlickerTimerS > 0.02 ? '#ef4444' : '#f59e0b';
+      gpsCtx.lineWidth = 2;
+      gpsCtx.fillRect(14, 224, 134, 102);
+      gpsCtx.strokeRect(14, 224, 134, 102);
+
+      gpsCtx.fillStyle = '#fca5a5';
+      gpsCtx.textAlign = 'left';
+      gpsCtx.font = '800 11px "JetBrains Mono", monospace';
+      gpsCtx.fillText(`CHASSIS DMG #${state.collisionCount}`, 22, 240);
+
+      const zoneColor = (d: number) =>
+        d > 0.55 ? '#ef4444' : d > 0.2 ? '#f59e0b' : d > 0.03 ? '#fde047' : '#334155';
+
+      // Top-down mini schematic boxes (Front L/C/R, Side L/R, Rear)
+      gpsCtx.fillStyle = zoneColor(state.zoneDamage.front_left);
+      gpsCtx.fillRect(36, 252, 22, 14);
+      gpsCtx.fillStyle = zoneColor(state.zoneDamage.front_center);
+      gpsCtx.fillRect(62, 250, 26, 16);
+      gpsCtx.fillStyle = zoneColor(state.zoneDamage.front_right);
+      gpsCtx.fillRect(92, 252, 22, 14);
+
+      gpsCtx.fillStyle = zoneColor(state.zoneDamage.side_left);
+      gpsCtx.fillRect(36, 270, 18, 28);
+      gpsCtx.fillStyle = '#1e293b';
+      gpsCtx.fillRect(58, 270, 34, 28);
+      gpsCtx.fillStyle = zoneColor(state.zoneDamage.side_right);
+      gpsCtx.fillRect(96, 270, 18, 28);
+
+      gpsCtx.fillStyle = zoneColor(state.zoneDamage.rear);
+      gpsCtx.fillRect(46, 302, 58, 14);
+    }
 
     // Top NHAI Green Corridor Header Bar (Dynamic across NH-44, NH-48 & NH-66!)
     gpsCtx.fillStyle = '#065f46';
@@ -1266,6 +1341,14 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
       498,
       361
     );
+
+    if (state.lightFlickerTimerS > 0.02 || state.hudGlitchTimerS > 0.02) {
+      const phase = state.lightFlickerTimerS * 39 + state.collisionCount * 1.7;
+      if (Math.sin(phase) < -0.15) {
+        gpsCtx.fillStyle = 'rgba(5, 8, 16, 0.52)';
+        gpsCtx.fillRect(0, 0, 512, 384);
+      }
+    }
 
     gpsNavMap.needsUpdate = true;
   };

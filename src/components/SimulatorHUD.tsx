@@ -896,7 +896,336 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
           </HudMedallionButton>
         </div>
         </div>
+
+        {/* Live 6-Zone Truck Structural & Electrical Damage Schematic Pod (appears after 1st collision) */}
+        {telemetry.collisionCount > 0 && telemetry.zoneDamage && (
+          <div
+            data-testid="hud-damage-schematic"
+            className="pointer-events-none self-start drop-shadow-xl"
+          >
+            <svg
+              viewBox="0 0 340 54"
+              className="w-[235px] sm:w-[328px] h-auto overflow-visible"
+              role="img"
+              aria-label={`Structural Damage Schematic: ${telemetry.collisionCount} collisions`}
+            >
+              <path
+                d="M10 2 H326 L338 14 V42 L326 52 H10 C5 52 2 48 2 42 V12 C2 6 5 2 10 2 Z"
+                fill="#0c0a09"
+                fillOpacity="0.9"
+                stroke={
+                  telemetry.lightFlickerTimerS > 0.02
+                    ? '#ef4444'
+                    : telemetry.collisionCount >= 3
+                      ? '#f97316'
+                      : '#44403c'
+                }
+                strokeWidth="1.8"
+              />
+
+              {/* Top-Down 6-Zone Heavy Truck Chassis Silhouette (x=12..94, y=8..46) */}
+              {(() => {
+                const zColor = (v: number) =>
+                  v > 0.55
+                    ? '#ef4444'
+                    : v > 0.22
+                      ? '#f59e0b'
+                      : v > 0.04
+                        ? '#fde047'
+                        : '#292524';
+                const zd = telemetry.zoneDamage;
+                const flFlicker =
+                  telemetry.headlightLeftDamage > 0.12 &&
+                  (telemetry.lightFlickerTimerS > 0.02 || telemetry.headlightLeftDamage > 0.45);
+                const frFlicker =
+                  telemetry.headlightRightDamage > 0.12 &&
+                  (telemetry.lightFlickerTimerS > 0.02 || telemetry.headlightRightDamage > 0.45);
+                return (
+                  <g>
+                    {/* Headlight Beam Cones (Left & Right) */}
+                    <polygon
+                      points="4,12 16,15 16,21 4,19"
+                      fill={flFlicker ? '#ef4444' : '#38bdf8'}
+                      fillOpacity={flFlicker ? 0.85 : 0.45}
+                    />
+                    <polygon
+                      points="4,35 16,33 16,39 4,42"
+                      fill={frFlicker ? '#ef4444' : '#38bdf8'}
+                      fillOpacity={frFlicker ? 0.85 : 0.45}
+                    />
+
+                    {/* Front-Left, Front-Center, Front-Right Bumper/Grille Zones */}
+                    <rect
+                      x="17"
+                      y="10"
+                      width="12"
+                      height="10"
+                      rx="2"
+                      fill={zColor(zd.front_left)}
+                      stroke="#0c0a09"
+                      strokeWidth="1"
+                    />
+                    <rect
+                      x="15"
+                      y="21"
+                      width="14"
+                      height="12"
+                      rx="2"
+                      fill={zColor(zd.front_center)}
+                      stroke="#0c0a09"
+                      strokeWidth="1"
+                    />
+                    <rect
+                      x="17"
+                      y="34"
+                      width="12"
+                      height="10"
+                      rx="2"
+                      fill={zColor(zd.front_right)}
+                      stroke="#0c0a09"
+                      strokeWidth="1"
+                    />
+
+                    {/* Side-Left, Cab Core, Side-Right Zones */}
+                    <rect
+                      x="31"
+                      y="10"
+                      width="26"
+                      height="8"
+                      rx="1.5"
+                      fill={zColor(zd.side_left)}
+                      stroke="#0c0a09"
+                      strokeWidth="1"
+                    />
+                    <rect
+                      x="31"
+                      y="19"
+                      width="26"
+                      height="16"
+                      rx="2"
+                      fill="#1c1917"
+                      stroke="#44403c"
+                      strokeWidth="1"
+                    />
+                    <rect
+                      x="31"
+                      y="36"
+                      width="26"
+                      height="8"
+                      rx="1.5"
+                      fill={zColor(zd.side_right)}
+                      stroke="#0c0a09"
+                      strokeWidth="1"
+                    />
+
+                    {/* Rear Trailer / Tailgate Zone */}
+                    <rect
+                      x="59"
+                      y="11"
+                      width="30"
+                      height="32"
+                      rx="2.5"
+                      fill={zColor(zd.rear)}
+                      stroke="#0c0a09"
+                      strokeWidth="1"
+                    />
+
+                    {/* Left & Right 3D Wing Mirror Tabs on Schematic */}
+                    <rect
+                      x="26"
+                      y="4"
+                      width="7"
+                      height="5"
+                      rx="1"
+                      fill={zColor(telemetry.mirrorLeftDamage || 0)}
+                      stroke="#0c0a09"
+                      strokeWidth="0.9"
+                    />
+                    <rect
+                      x="26"
+                      y="45"
+                      width="7"
+                      height="5"
+                      rx="1"
+                      fill={zColor(telemetry.mirrorRightDamage || 0)}
+                      stroke="#0c0a09"
+                      strokeWidth="0.9"
+                    />
+                  </g>
+                );
+              })()}
+
+              {/* Telemetry Readout: Nth Collision, Last Zone, 3D Windshield & 3D Wing Mirror Status */}
+              <text
+                x="100"
+                y="19"
+                fill={telemetry.lightFlickerTimerS > 0.02 ? '#fca5a5' : '#fbbf24'}
+                fontFamily="JetBrains Mono, monospace"
+                fontWeight="800"
+                fontSize="10"
+              >
+                {`HIT #${telemetry.collisionCount} · ${(telemetry.lastCollisionZone || 'FRONT')
+                  .replace('_', ' ')
+                  .toUpperCase()} · 3D GLASS: ${telemetry.windshieldCracks?.length || 0}`}
+              </text>
+              <text
+                x="100"
+                y="33"
+                fill={telemetry.lightFlickerTimerS > 0.02 ? '#ef4444' : '#d6d3d1'}
+                fontFamily="JetBrains Mono, monospace"
+                fontWeight="700"
+                fontSize="9"
+              >
+                {telemetry.lightFlickerTimerS > 0.02
+                  ? `TEMP: LIGHT & RELAY FLICKER (${telemetry.lightFlickerTimerS.toFixed(1)}S)`
+                  : `3D DENTS · MIRRORS L:${Math.round(
+                      (1 - (telemetry.mirrorLeftDamage || 0)) * 100
+                    )}% R:${Math.round((1 - (telemetry.mirrorRightDamage || 0)) * 100)}%`}
+              </text>
+              <text
+                x="100"
+                y="45"
+                fill="#a8a29e"
+                fontFamily="JetBrains Mono, monospace"
+                fontWeight="600"
+                fontSize="8.5"
+              >
+                {`LAMPS L:${Math.round((1 - telemetry.headlightLeftDamage) * 100)}% R:${Math.round(
+                  (1 - telemetry.headlightRightDamage) * 100
+                )}% · RAD ${Math.round((1 - telemetry.engineDamage) * 100)}%`}
+              </text>
+            </svg>
+          </div>
+        )}
       </div>
+
+      {/* TEMPORARY POST-COLLISION DIRECTIONAL SHOCKWAVE VIGNETTE & ELECTRICAL FLICKER:
+          Note: All windshield & side wing mirror cracks and sheet-metal dents are rendered
+          directly in 3D on the truck's 3D windshield (`windshieldDamageMesh`), 3D side mirrors
+          (`leftMirrorCrackMesh` / `rightMirrorCrackMesh`), and 3D cab/bumper geometry! */}
+      {(telemetry.impactFlashTimerS > 0.01 || telemetry.lightFlickerTimerS > 0.02) && (
+        <div
+          data-testid="damage-overlay"
+          data-collision-count={telemetry.collisionCount}
+          data-crack-count={telemetry.windshieldCracks?.length || 0}
+          data-mirror-left-dmg={(telemetry.mirrorLeftDamage || 0).toFixed(2)}
+          data-mirror-right-dmg={(telemetry.mirrorRightDamage || 0).toFixed(2)}
+          data-flicker-active={telemetry.lightFlickerTimerS > 0.02 ? 'true' : 'false'}
+          className="fixed inset-0 z-10 pointer-events-none overflow-hidden select-none"
+        >
+          <svg
+            viewBox="0 0 1600 900"
+            preserveAspectRatio="none"
+            className="w-full h-full"
+          >
+            <defs>
+              <radialGradient id="impactShockLeft" cx="0%" cy="50%" r="65%">
+                <stop offset="0%" stopColor="#ef4444" stopOpacity="0.58" />
+                <stop offset="45%" stopColor="#f59e0b" stopOpacity="0.18" />
+                <stop offset="100%" stopColor="#000000" stopOpacity="0" />
+              </radialGradient>
+              <radialGradient id="impactShockRight" cx="100%" cy="50%" r="65%">
+                <stop offset="0%" stopColor="#ef4444" stopOpacity="0.58" />
+                <stop offset="45%" stopColor="#f59e0b" stopOpacity="0.18" />
+                <stop offset="100%" stopColor="#000000" stopOpacity="0" />
+              </radialGradient>
+              <radialGradient id="impactShockCenter" cx="50%" cy="22%" r="65%">
+                <stop offset="0%" stopColor="#ef4444" stopOpacity="0.54" />
+                <stop offset="45%" stopColor="#f59e0b" stopOpacity="0.18" />
+                <stop offset="100%" stopColor="#000000" stopOpacity="0" />
+              </radialGradient>
+              <radialGradient id="impactShockRear" cx="50%" cy="95%" r="65%">
+                <stop offset="0%" stopColor="#ef4444" stopOpacity="0.54" />
+                <stop offset="45%" stopColor="#f59e0b" stopOpacity="0.18" />
+                <stop offset="100%" stopColor="#000000" stopOpacity="0" />
+              </radialGradient>
+            </defs>
+
+            {/* A. TEMPORARY Directional Collision Shockwave Vignette (decays over impactFlashTimerS) */}
+            {telemetry.impactFlashTimerS > 0.01 && (
+              <rect
+                x="0"
+                y="0"
+                width="1600"
+                height="900"
+                opacity={Math.min(1, telemetry.impactFlashTimerS * 1.25)}
+                fill={
+                  telemetry.lastCollisionZone === 'front_left' ||
+                  telemetry.lastCollisionZone === 'side_left'
+                    ? 'url(#impactShockLeft)'
+                    : telemetry.lastCollisionZone === 'front_right' ||
+                        telemetry.lastCollisionZone === 'side_right'
+                      ? 'url(#impactShockRight)'
+                      : telemetry.lastCollisionZone === 'rear'
+                        ? 'url(#impactShockRear)'
+                        : 'url(#impactShockCenter)'
+                }
+              />
+            )}
+
+            {/* B. TEMPORARY Electrical Headlight/Cockpit Voltage Flicker Strobe */}
+            {telemetry.lightFlickerTimerS > 0.02 &&
+              Math.sin(telemetry.lightFlickerTimerS * 47 + telemetry.collisionCount * 3.1) <
+                -0.25 && (
+                <rect
+                  x="0"
+                  y="0"
+                  width="1600"
+                  height="900"
+                  fill="#090d16"
+                  fillOpacity="0.22"
+                />
+              )}
+          </svg>
+
+          {/* C. Temporary Impact Banner (visible during post-collision electrical flicker / flash) */}
+          {(telemetry.impactFlashTimerS > 0.05 || telemetry.lightFlickerTimerS > 0.25) && (
+            <div className="absolute top-22 left-1/2 -translate-x-1/2 pointer-events-none">
+              <svg
+                viewBox="0 0 500 46"
+                className="w-[330px] sm:w-[460px] h-auto drop-shadow-2xl"
+              >
+                <polygon
+                  points="16,4 484,4 496,23 484,42 16,42 4,23"
+                  fill="#450a0a"
+                  fillOpacity="0.94"
+                  stroke="#ef4444"
+                  strokeWidth="2.4"
+                />
+                <text
+                  x="250"
+                  y="20"
+                  textAnchor="middle"
+                  fill="#fef2f2"
+                  fontFamily="Chakra Petch, sans-serif"
+                  fontWeight="800"
+                  fontSize="13"
+                  letterSpacing="1"
+                >
+                  {`COLLISION #${telemetry.collisionCount} · ${(
+                    telemetry.lastCollisionZone || 'FRONT'
+                  )
+                    .replace('_', ' ')
+                    .toUpperCase()} IMPACT (${Math.round(
+                    telemetry.lastCollisionIntensity * 100
+                  )}%)`}
+                </text>
+                <text
+                  x="250"
+                  y="35"
+                  textAnchor="middle"
+                  fill="#fde047"
+                  fontFamily="JetBrains Mono, monospace"
+                  fontWeight="700"
+                  fontSize="10"
+                >
+                  TEMP: HEADLIGHT & RELAY FLICKER · PERM: 3D DENT & WINDSHIELD CRACK
+                </text>
+              </svg>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Warning Graphic Emblem for Trailer Jackknife */}
       {telemetry.jackknifeWarning && (

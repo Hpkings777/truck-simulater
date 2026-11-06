@@ -29,6 +29,7 @@ export class TruckAudioEngine {
 
   private lastShiftTrigger = 0;
   private lastAirBrakeTrigger = 0;
+  private lastCollisionTrigger = 0;
   private lastIndicatorBlink = false;
 
   public init(): void {
@@ -205,22 +206,203 @@ export class TruckAudioEngine {
     // Dual-tone Highway Horn
     this.hornGain?.gain.setTargetAtTime(state.hornActive ? 0.24 : 0, now, 0.02);
 
-    // Trigger pneumatic gear-shift hiss + mechanical clunk
+    // Trigger pneumatic gear-shift hiss + mechanical clunk + subtle tactile micro-pulse
     if (state.gearShiftTrigger !== this.lastShiftTrigger) {
       this.lastShiftTrigger = state.gearShiftTrigger;
       this.playPneumaticBurst(0.11, 950, 0.12);
+      this.triggerMicroHaptic(18, 0.22);
     }
 
-    // Trigger pneumatic air-brake chamber release hiss
+    // Trigger pneumatic air-brake chamber release hiss + subtle tactile pulse
     if (state.airBrakeReleaseTrigger !== this.lastAirBrakeTrigger) {
       this.lastAirBrakeTrigger = state.airBrakeReleaseTrigger;
       this.playPneumaticBurst(0.24, 1850, 0.16);
+      this.triggerMicroHaptic(28, 0.3);
     }
 
     // Trigger turn indicator relay click-clack
     if (state.indicator !== 'off' && state.indicatorBlinkOn !== this.lastIndicatorBlink) {
       this.lastIndicatorBlink = state.indicatorBlinkOn;
       this.playIndicatorClick(state.indicatorBlinkOn ? 1150 : 840);
+    }
+
+    // Trigger heavy collision impact crunch, sheet-metal crumple, glass shatter & hardware haptics
+    if (state.collisionTrigger !== this.lastCollisionTrigger) {
+      this.lastCollisionTrigger = state.collisionTrigger;
+      this.triggerCollisionHaptics(
+        state.lastCollisionIntensity,
+        state.collisionCount,
+        state.lastCollisionZone
+      );
+      this.playCollisionImpact(state.lastCollisionIntensity, state.collisionCount);
+    }
+  }
+
+  /**
+   * Triggers multi-stage physical haptic feedback via `navigator.vibrate` (Android/mobile)
+   * and Web Gamepad API `vibrationActuator.playEffect('dual-rumble')` (controllers/steering wheels).
+   * Scales pulse pattern and low/high frequency motor rumble by collision zone, intensity, and Nth collision.
+   */
+  private triggerCollisionHaptics(
+    intensity: number,
+    nthCollision: number,
+    zone: TruckPhysicsState['lastCollisionZone']
+  ): void {
+    const clampedInt = Math.max(0.2, Math.min(1, intensity));
+    const nthScale = Math.min(1.5, 1 + (nthCollision - 1) * 0.14);
+
+    // 1. Mobile / Tablet Hardware Haptics (`navigator.vibrate`)
+    try {
+      if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+        const primaryMs = Math.round((45 + clampedInt * 110) * nthScale);
+        const gap1Ms = 28;
+        const secondaryCrunchMs = Math.round((30 + clampedInt * 85) * nthScale);
+        if (nthCollision >= 2 || clampedInt > 0.55) {
+          const aftershockMs = Math.round(25 + clampedInt * 65);
+          navigator.vibrate([primaryMs, gap1Ms, secondaryCrunchMs, 35, aftershockMs]);
+        } else {
+          navigator.vibrate([primaryMs, gap1Ms, secondaryCrunchMs]);
+        }
+      }
+    } catch {
+      // Ignore vibration permission errors
+    }
+
+    // 2. Web Gamepad API Dual-Rumble Force Feedback (`vibrationActuator`)
+    try {
+      if (typeof navigator !== 'undefined' && typeof navigator.getGamepads === 'function') {
+        const pads = navigator.getGamepads();
+        const isHeavyChassisHit =
+          zone === 'front_center' || zone === 'rear' || clampedInt > 0.5;
+        const strongMag = Math.min(
+          1.0,
+          clampedInt * (isHeavyChassisHit ? 1.0 : 0.78) * nthScale
+        );
+        const weakMag = Math.min(1.0, (0.35 + clampedInt * 0.65) * nthScale);
+        const durationMs = Math.round((160 + clampedInt * 280) * nthScale);
+
+        for (const pad of pads) {
+          if (!pad) continue;
+          const actuator = (
+            pad as Gamepad & {
+              vibrationActuator?: {
+                playEffect?: (
+                  type: string,
+                  params: {
+                    startDelay?: number;
+                    duration: number;
+                    weakMagnitude: number;
+                    strongMagnitude: number;
+                  }
+                ) => Promise<unknown>;
+              };
+            }
+          ).vibrationActuator;
+          if (actuator && typeof actuator.playEffect === 'function') {
+            actuator
+              .playEffect('dual-rumble', {
+                startDelay: 0,
+                duration: durationMs,
+                weakMagnitude: weakMag,
+                strongMagnitude: strongMag,
+              })
+              .catch(() => {});
+          }
+        }
+      }
+    } catch {
+      // Ignore Gamepad API errors
+    }
+  }
+
+  private triggerMicroHaptic(durationMs: number, magnitude: number): void {
+    try {
+      if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+        navigator.vibrate(durationMs);
+      }
+      if (typeof navigator !== 'undefined' && typeof navigator.getGamepads === 'function') {
+        const pads = navigator.getGamepads();
+        for (const pad of pads) {
+          const actuator = (
+            pad as Gamepad & {
+              vibrationActuator?: {
+                playEffect?: (
+                  type: string,
+                  params: {
+                    startDelay?: number;
+                    duration: number;
+                    weakMagnitude: number;
+                    strongMagnitude: number;
+                  }
+                ) => Promise<unknown>;
+              };
+            }
+          )?.vibrationActuator;
+          if (actuator && typeof actuator.playEffect === 'function') {
+            actuator
+              .playEffect('dual-rumble', {
+                startDelay: 0,
+                duration: durationMs,
+                weakMagnitude: magnitude,
+                strongMagnitude: magnitude * 0.6,
+              })
+              .catch(() => {});
+          }
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  private playCollisionImpact(intensity: number, nthCollision: number): void {
+    if (!this.ctx || !this.masterGain || this.isMuted) return;
+    try {
+      const now = this.ctx.currentTime;
+      const clampedInt = Math.max(0.2, Math.min(1, intensity));
+      const nthBoost = Math.min(1.4, 1 + (nthCollision - 1) * 0.12);
+
+      // 1. Sub-bass heavy chassis frame thud (95 Hz -> 28 Hz)
+      const thudOsc = this.ctx.createOscillator();
+      const thudGain = this.ctx.createGain();
+      thudOsc.type = 'sine';
+      thudOsc.frequency.setValueAtTime(95, now);
+      thudOsc.frequency.exponentialRampToValueAtTime(26, now + 0.34);
+      thudGain.gain.setValueAtTime(0.32 * clampedInt * nthBoost, now);
+      thudGain.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
+      thudOsc.connect(thudGain);
+      thudGain.connect(this.masterGain);
+      thudOsc.start(now);
+      thudOsc.stop(now + 0.38);
+
+      // 2. Sheet-metal crumple & high-frequency laminated glass shatter burst
+      const dur = 0.28 + clampedInt * 0.24;
+      const bufLen = Math.floor(this.ctx.sampleRate * dur);
+      const buf = this.ctx.createBuffer(1, bufLen, this.ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < bufLen; i++) {
+        const env = Math.exp(-i / (bufLen * 0.35));
+        const glassCrackle = i % 97 < 6 ? 1.65 : 0.85;
+        data[i] = (Math.random() * 2 - 1) * env * glassCrackle;
+      }
+      const noiseSrc = this.ctx.createBufferSource();
+      noiseSrc.buffer = buf;
+
+      const bandpass = this.ctx.createBiquadFilter();
+      bandpass.type = 'bandpass';
+      bandpass.frequency.setValueAtTime(780 + nthCollision * 140, now);
+      bandpass.Q.value = 1.1;
+
+      const crunchGain = this.ctx.createGain();
+      crunchGain.gain.setValueAtTime(0.26 * clampedInt * nthBoost, now);
+      crunchGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+      noiseSrc.connect(bandpass);
+      bandpass.connect(crunchGain);
+      crunchGain.connect(this.masterGain);
+      noiseSrc.start(now);
+    } catch {
+      // Ignore audio synthesis errors
     }
   }
 

@@ -1,5 +1,5 @@
 import { LANE_CENTERS, splineToWorld } from './highwaySpline';
-import { TruckPhysicsState } from './vehiclePhysics';
+import { applyTruckCollision, DamageZoneId, TruckPhysicsState } from './vehiclePhysics';
 
 export type TrafficArchetype = 'lorry' | 'bus' | 'sedan' | 'pickup';
 
@@ -25,6 +25,9 @@ export interface TrafficVehicle {
   indicator: 'off' | 'left' | 'right';
   laneChangeCooldownS: number;
   braking: boolean;
+  impactLatVelMs: number;
+  impactYawOffset: number;
+  damageSeverity: number;
 }
 
 const ARCHETYPE_SPECS: Record<
@@ -142,6 +145,9 @@ export function createInitialTrafficFleet(playerS = 60): TrafficVehicle[] {
       indicator: 'off',
       laneChangeCooldownS: 3 + (i % 5),
       braking: false,
+      impactLatVelMs: 0,
+      impactYawOffset: 0,
+      damageSeverity: 0,
     });
   }
 
@@ -268,16 +274,34 @@ export function stepTrafficSimulation(
     if (v.direction === 1) {
       if (relS < -140) {
         v.s = player.distanceAlongHighwayM + 380 + (v.id % 7) * 18;
+        v.damageSeverity = 0;
+        v.impactYawOffset = 0;
       } else if (relS > 520) {
         v.s = player.distanceAlongHighwayM - 95 - (v.id % 5) * 14;
+        v.damageSeverity = 0;
+        v.impactYawOffset = 0;
       }
     } else {
       // Oncoming vehicles move toward -s; recycle behind player back to far ahead
       if (relS < -140) {
         v.s = player.distanceAlongHighwayM + 440 + (v.id % 8) * 22;
+        v.damageSeverity = 0;
+        v.impactYawOffset = 0;
       } else if (relS > 560) {
         v.s = player.distanceAlongHighwayM + 420;
+        v.damageSeverity = 0;
+        v.impactYawOffset = 0;
       }
+    }
+
+    // Step AI vehicle post-collision lateral slide and yaw spin recovery
+    if (Math.abs(v.impactLatVelMs) > 0.02) {
+      v.laneOffset += v.impactLatVelMs * dt;
+      v.targetLaneOffset = Math.max(-10.2, Math.min(10.2, v.laneOffset));
+      v.impactLatVelMs *= Math.exp(-5.0 * dt);
+    }
+    if (Math.abs(v.impactYawOffset) > 0.005) {
+      v.impactYawOffset *= Math.exp(-3.8 * dt);
     }
 
     // 5. Compute 3D World Transform from Highway Spline
@@ -288,45 +312,91 @@ export function stepTrafficSimulation(
     const laneSteerHeadingOffset = Math.atan2(v.targetLaneOffset - v.laneOffset, 12) * 0.35;
     v.heading =
       (v.direction === 1 ? worldPos.sample.heading : worldPos.sample.heading + Math.PI) +
-      laneSteerHeadingOffset;
+      laneSteerHeadingOffset +
+      v.impactYawOffset;
     v.pitch = -worldPos.sample.grade * v.direction;
-    v.roll = worldPos.sample.bankAngle * v.direction;
+    v.roll = worldPos.sample.bankAngle * v.direction + v.impactYawOffset * 0.28;
     v.wheelRotationRad = (v.wheelRotationRad + (v.speedMs / 0.45) * dt) % (Math.PI * 1000);
 
-    // 6. Check Physical Bounding-Box Proximity / Collision with Player Tractor
+    // 6. Physical Bounding-Box Rigid-Body Collision & Momentum Exchange with Player Tractor
     const longDist = Math.abs(v.s - player.distanceAlongHighwayM);
     const latDist = Math.abs(v.laneOffset - player.lateralOffsetM);
     const minSafeLong = v.lengthM * 0.5 + 3.8;
     const minSafeLat = v.widthM * 0.5 + 1.25;
 
     if (longDist < minSafeLong && latDist < minSafeLat) {
-      // Separate vehicles cleanly along lateral or longitudinal axis
+      const signedLongDiff = v.s - player.distanceAlongHighwayM; // >0 means AI vehicle is ahead of player
+      const signedLatDiff = v.laneOffset - player.lateralOffsetM; // <0 means AI vehicle is to the left of player
+      const isHeavyAi = v.archetype === 'lorry' || v.archetype === 'bus';
+      // Mass ratio: player ~32t vs AI lorry/bus ~16t or AI sedan/pickup ~2.2t
+      const aiKnockbackScale = isHeavyAi ? 0.55 : 1.35;
+      const playerRecoilScale = isHeavyAi ? 1.15 : 0.48;
+
+      // Separate vehicles cleanly along minimum penetration axis with elastic + inelastic restitution
       if (latDist > longDist * 0.28) {
         const pushDir = player.lateralOffsetM >= v.laneOffset ? 1 : -1;
-        player.lateralOffsetM += pushDir * (minSafeLat - latDist + 0.25);
+        const overlapLat = minSafeLat - latDist + 0.28;
+        player.lateralOffsetM += pushDir * overlapLat * playerRecoilScale * 0.6;
+        v.laneOffset -= pushDir * overlapLat * aiKnockbackScale * 0.75;
+        v.impactLatVelMs = -pushDir * (2.5 + Math.abs(player.speedMs) * 0.18) * aiKnockbackScale;
+        v.impactYawOffset = pushDir * (signedLongDiff >= 0 ? -0.24 : 0.24) * aiKnockbackScale;
         const pushedWorld = splineToWorld(player.distanceAlongHighwayM, player.lateralOffsetM, 0);
         player.x = pushedWorld.x;
         player.z = pushedWorld.z;
       } else {
+        const relVelLong = player.speedMs - v.speedMs * v.direction;
         if (player.distanceAlongHighwayM < v.s) {
-          player.speedMs = Math.min(player.speedMs, v.speedMs * v.direction * 0.75);
-          v.s += 1.5;
+          // Player ramming rear/front of vehicle ahead
+          player.speedMs -= Math.max(1.2, relVelLong * 0.38 * playerRecoilScale);
+          if (v.direction === 1) {
+            v.speedMs = Math.max(v.speedMs + relVelLong * 0.45 * aiKnockbackScale, player.speedMs + 2.2);
+            v.s += 1.8;
+          } else {
+            v.speedMs *= 0.35;
+            v.s += 2.2;
+          }
+          v.impactLatVelMs = (signedLatDiff >= 0 ? 1 : -1) * 2.8 * aiKnockbackScale;
+          v.impactYawOffset = (signedLatDiff >= 0 ? -0.28 : 0.28) * aiKnockbackScale;
         } else {
-          v.speedMs *= 0.6;
-          v.s -= 1.5;
+          // AI vehicle rear-ending player trailer/tailgate
+          player.speedMs = Math.min(30.5, player.speedMs + 1.6);
+          v.speedMs *= 0.45;
+          v.s -= 1.8;
+          v.impactYawOffset = (signedLatDiff >= 0 ? 0.22 : -0.22) * aiKnockbackScale;
         }
       }
+      v.braking = true;
 
-      // Apply weight-scaled impact feedback (hitstop + camera shake + cargo damage)
+      // Determine exact collision zone on the player's truck from relative pose
+      let impactZone: DamageZoneId = 'front_center';
+      if (signedLongDiff > 1.2) {
+        if (signedLatDiff < -0.45) impactZone = 'front_left';
+        else if (signedLatDiff > 0.45) impactZone = 'front_right';
+        else impactZone = 'front_center';
+      } else if (signedLongDiff < -2.2) {
+        impactZone = 'rear';
+      } else {
+        impactZone = signedLatDiff <= 0 ? 'side_left' : 'side_right';
+      }
+
+      const localX = Math.max(-1.25, Math.min(1.25, signedLatDiff * 0.65));
+      const localZ =
+        impactZone === 'rear'
+          ? 5.8
+          : impactZone === 'side_left' || impactZone === 'side_right'
+            ? -1.65
+            : -2.88;
+
       const relSpeed = Math.abs(player.speedMs - v.speedMs * v.direction);
-      if (relSpeed > 2.5) {
-        player.hitstopTimerS = Math.min(0.06, 0.025 + relSpeed * 0.002);
-        player.cameraTrauma = Math.min(1.0, player.cameraTrauma + 0.35 + relSpeed * 0.03);
-        player.cargoIntegrityPct = Math.max(
-          0,
-          Math.round((player.cargoIntegrityPct - Math.min(12, 2 + relSpeed * 0.45)) * 10) / 10
-        );
-        player.lastImpactSeverity = Math.min(1, relSpeed / 15);
+      if (relSpeed > 1.5) {
+        const heavyArchetypeBonus = isHeavyAi ? 1.25 : 1.0;
+        const rawSeverity = Math.min(1.0, ((relSpeed + 2.2) / 15.5) * heavyArchetypeBonus);
+        v.damageSeverity = Math.min(1.0, v.damageSeverity + rawSeverity * 0.65);
+        applyTruckCollision(player, impactZone, rawSeverity, {
+          x: localX,
+          y: 0.96,
+          z: localZ,
+        });
       }
     }
   }

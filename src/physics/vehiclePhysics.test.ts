@@ -9,6 +9,7 @@ import {
   splineToWorld,
 } from './highwaySpline';
 import {
+  applyTruckCollision,
   computeEngineTorqueNm,
   createInitialTruckState,
   HEAVY_TRUCK_GEARS,
@@ -211,4 +212,67 @@ test('Rigid highway guardrails and road deck prevent tractor or trailer from pha
   );
   setActiveMapId('nh44_plains');
 });
+
+test('Collision damage system scales temporary and permanent effects by location, intensity, and Nth collision', () => {
+  const state = createInitialTruckState(120, 'tata_prima_4928');
+  assert.equal(state.collisionCount, 0);
+  assert.equal(state.windshieldCracks.length, 0);
+
+  // 1st Collision: Front-Left moderate impact
+  applyTruckCollision(state, 'front_left', 0.45);
+  assert.equal(state.collisionCount, 1);
+  assert.equal(state.lastCollisionZone, 'front_left');
+  assert.ok(state.zoneDamage.front_left > 0.08, 'Front-left zone should record permanent dent damage');
+  assert.equal(state.zoneDamage.front_right, 0, 'Front-right zone should remain undamaged on moderate front-left hit');
+  assert.ok(state.headlightLeftDamage > 0, 'Left headlight should sustain damage on front-left impact');
+  assert.equal(state.headlightRightDamage, 0, 'Right headlight should remain undamaged on front-left impact');
+  assert.ok(state.mirrorLeftDamage > 0.1, 'Left 3D wing mirror should sustain crack/housing damage on front-left impact');
+  assert.equal(state.mirrorRightDamage, 0, 'Right 3D wing mirror should remain undamaged on front-left impact');
+  assert.ok(state.impactYawImpulseRadS > 0.05, 'Front-left impact should impart clockwise yaw impulse');
+  assert.ok(state.impactLateralVelMs > 0.2, 'Front-left impact should shove tractor laterally to the right (+X)');
+  assert.ok(state.cabinPitchVel < -0.2, 'Frontal impact should pitch pneumatic cab nose-down');
+  assert.ok(state.lightFlickerTimerS > 1.5, 'Temporary light flicker timer should activate on impact');
+  assert.ok(state.impactFlashTimerS > 0.3, 'Temporary impact flash should activate');
+  assert.ok(state.sparkBurstTimerS > 0.4, 'Temporary 3D metallic spark burst should activate');
+  assert.equal(state.windshieldCracks.length, 1, 'Frontal impact should add a permanent 3D windshield crack node');
+  assert.ok(
+    state.windshieldCracks[0].normX < 0.45,
+    `Front-left crack should appear on left side of 3D windshield (< 0.45), got ${state.windshieldCracks[0].normX}`
+  );
+
+  // Advance simulation by 2.5s so temporary flash/sparks/impulses decay while permanent 3D damage persists
+  for (let i = 0; i < 150; i++) {
+    stepTruckPhysics(state, neutralInput, 1 / 60, i / 60);
+  }
+  assert.equal(state.impactFlashTimerS, 0, 'Temporary impact flash must decay to 0 after ~1s');
+  assert.equal(state.sparkBurstTimerS, 0, 'Temporary spark burst must decay to 0 after ~1s');
+  assert.ok(Math.abs(state.impactYawImpulseRadS) < 0.01, 'Yaw impulse should damp out via tire scrub');
+  assert.ok(state.zoneDamage.front_left > 0.08, 'Permanent front-left 3D dent must persist for the haul');
+  assert.ok(state.mirrorLeftDamage > 0.1, 'Permanent left 3D wing mirror crack must persist for the haul');
+  assert.equal(state.windshieldCracks.length, 1, 'Permanent 3D windshield crack must persist for the haul');
+
+  // 2nd Collision: Heavy Front-Right impact escalates Nth collision severity & damages Right 3D Wing Mirror
+  const flickerBefore2nd = state.lightFlickerTimerS;
+  applyTruckCollision(state, 'front_right', 0.78);
+  assert.equal(state.collisionCount, 2);
+  assert.ok(state.headlightRightDamage > 0.25, 'Right headlight should sustain heavy damage on front-right hit');
+  assert.ok(state.mirrorRightDamage > 0.25, 'Right 3D wing mirror should sustain heavy crack/bracket damage on front-right hit');
+  assert.ok(state.impactYawImpulseRadS < -0.1, 'Front-right impact should impart counter-clockwise yaw impulse');
+  assert.ok(state.lightFlickerTimerS > flickerBefore2nd, '2nd collision should extend temporary light flicker duration');
+  assert.equal(state.windshieldCracks.length, 2, '2nd collision should add a second 3D windshield crack on right RHD driver side');
+  assert.ok(
+    state.windshieldCracks[1].normX > 0.55,
+    `Front-right crack should appear on right side of 3D windshield (> 0.55), got ${state.windshieldCracks[1].normX}`
+  );
+  assert.ok(state.engineDamage > 0.15, 'Frontal collisions should accumulate permanent engine/radiator damage');
+
+  // Starting a fresh haul resets all permanent damage
+  const freshHaul = createInitialTruckState(60, 'tata_prima_4928');
+  assert.equal(freshHaul.collisionCount, 0);
+  assert.equal(freshHaul.zoneDamage.front_left, 0);
+  assert.equal(freshHaul.mirrorLeftDamage, 0);
+  assert.equal(freshHaul.mirrorRightDamage, 0);
+  assert.equal(freshHaul.windshieldCracks.length, 0);
+});
+
 

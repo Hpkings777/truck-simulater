@@ -1,8 +1,21 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { applyUltraFlakeShaderToPaint, HighwayTextureSet } from './materialsAndTextures';
-import { TruckModelId, TruckPhysicsState } from '../physics/vehiclePhysics';
+import { DamageZoneId, TruckModelId, TruckPhysicsState } from '../physics/vehiclePhysics';
 import { TrafficArchetype } from '../physics/trafficSimulation';
+
+export interface ZoneDentStageMeshes {
+  group: THREE.Group;
+  stage1Scrapes: THREE.Group; // Minor impact (> 0.05): paint scrapes & shallow dings
+  stage2Creases: THREE.Group; // Moderate/2nd+ impact (> 0.28): deep buckled sheet-metal creases
+  stage3Crumple: THREE.Group; // Heavy/3rd+ impact (> 0.55): severe crumpled steel & torn lip
+}
+
+export interface DeformableMeshTarget {
+  mesh: THREE.Mesh;
+  origPositions: Float32Array;
+  localOffset: THREE.Vector3;
+}
 
 export interface PlayerRigMeshes {
   truckModelId: TruckModelId;
@@ -23,7 +36,11 @@ export interface PlayerRigMeshes {
   trailerWheelMeshes: THREE.Group[];
   headlightLeftSpot: THREE.SpotLight;
   headlightRightSpot: THREE.SpotLight;
-  headlightLensMat: THREE.MeshStandardMaterial;
+  headlightLeftLensMat: THREE.MeshStandardMaterial;
+  headlightRightLensMat: THREE.MeshStandardMaterial;
+  headlightLeftGroup: THREE.Group;
+  headlightRightGroup: THREE.Group;
+  cabinAmbientLight: THREE.PointLight;
   brakeLightMat: THREE.MeshStandardMaterial;
   indicatorLeftMat: THREE.MeshStandardMaterial;
   indicatorRightMat: THREE.MeshStandardMaterial;
@@ -31,8 +48,34 @@ export interface PlayerRigMeshes {
   mirrorCameraAnchor: THREE.Object3D;
   rightMirrorMesh: THREE.Mesh;
   leftMirrorMesh: THREE.Mesh;
+  leftMirrorGroup: THREE.Group;
+  rightMirrorGroup: THREE.Group;
+  leftMirrorCrackMesh: THREE.Mesh;
+  rightMirrorCrackMesh: THREE.Mesh;
+  leftMirrorCrackCanvas: HTMLCanvasElement;
+  rightMirrorCrackCanvas: HTMLCanvasElement;
+  leftMirrorCrackTex: THREE.CanvasTexture;
+  rightMirrorCrackTex: THREE.CanvasTexture;
+  leftMirrorDentGroup: THREE.Group;
+  rightMirrorDentGroup: THREE.Group;
+  windshieldDamageMesh: THREE.Mesh;
+  windshieldCrackCanvas: HTMLCanvasElement;
+  windshieldCrackTex: THREE.CanvasTexture;
+  lastSyncedDamageSignature: string;
+  deformableTargets: DeformableMeshTarget[];
   coolingFanGroup: THREE.Group;
   exhaustPuffs: THREE.Mesh[];
+  radiatorSmokePuffs: THREE.Mesh[];
+  bumperLeftGroup: THREE.Group;
+  bumperCenterGroup: THREE.Group;
+  bumperRightGroup: THREE.Group;
+  bullbarGroup: THREE.Group;
+  frontGrilleMesh: THREE.Mesh;
+  grilleSlats: THREE.Mesh[];
+  plateMesh: THREE.Mesh;
+  zoneDentGroups: Record<DamageZoneId, ZoneDentStageMeshes>;
+  sparkParticles: THREE.Points;
+  sparkVelocities: Float32Array;
   cabPaintMat: THREE.MeshPhysicalMaterial;
 }
 
@@ -370,8 +413,14 @@ export function buildPlayerTruckAndTrailer(
     roughness: 0.78,
   });
 
-  // Emissive Lamp Materials (calibrated so only active lamps exceed the Ultra HDR bloom threshold of 1.55)
-  const headlightLensMat = new THREE.MeshStandardMaterial({
+  // Emissive Lamp Materials (independent Left & Right headlight lens materials for localized flickering)
+  const headlightLeftLensMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    emissive: 0xfffbeb,
+    emissiveIntensity: 0.6,
+    roughness: 0.1,
+  });
+  const headlightRightLensMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     emissive: 0xfffbeb,
     emissiveIntensity: 0.6,
@@ -798,6 +847,29 @@ export function buildPlayerTruckAndTrailer(
   windshield.renderOrder = 5;
   cabinSuspensionGroup.add(windshield);
 
+  // Diegetic 3D Windshield Laminated Glass Fracture Mesh (visible in 1st-person Cabin & Front Orbit views)
+  const windshieldCrackCanvas = document.createElement('canvas');
+  windshieldCrackCanvas.width = 1024;
+  windshieldCrackCanvas.height = 512;
+  const windshieldCrackTex = new THREE.CanvasTexture(windshieldCrackCanvas);
+  windshieldCrackTex.colorSpace = THREE.SRGBColorSpace;
+  const windshieldDamageMat = new THREE.MeshBasicMaterial({
+    map: windshieldCrackTex,
+    transparent: true,
+    opacity: 0.94,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const windshieldDamageMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(2.24, 1.06),
+    windshieldDamageMat
+  );
+  windshieldDamageMesh.position.set(0, 2.45, -2.652);
+  windshieldDamageMesh.rotation.x = Math.PI + 0.15;
+  windshieldDamageMesh.renderOrder = 6;
+  windshieldDamageMesh.visible = false;
+  cabinSuspensionGroup.add(windshieldDamageMesh);
+
   for (const wx of [-0.52, 0.42]) {
     const wiperArm = new THREE.Mesh(
       new THREE.BoxGeometry(0.68, 0.03, 0.03),
@@ -877,43 +949,66 @@ export function buildPlayerTruckAndTrailer(
     exhaustPuffs.push(puff);
   }
 
-  // Sculpted Heavy Front Bumper, Bullbar, Multi-Slat Chrome Grille & Spinning Radiator Fan
-  const frontBumper = new THREE.Mesh(
-    createRoundedBoxGeometry(2.54, 0.52, 0.42, 0.07, 4),
+  // Sculpted 3-Section Deformable Heavy Front Bumper (Left, Center, Right) + Bullbar + Grille + Fan
+  const bumperLeftGroup = new THREE.Group();
+  bumperLeftGroup.position.set(-0.86, 0.72, -2.68);
+  const bumperLeftMesh = new THREE.Mesh(
+    createRoundedBoxGeometry(0.84, 0.52, 0.42, 0.06, 3),
     matteBumperMat
   );
-  frontBumper.position.set(0, 0.72, -2.68);
-  cabinSuspensionGroup.add(frontBumper);
+  bumperLeftGroup.add(bumperLeftMesh);
+  cabinSuspensionGroup.add(bumperLeftGroup);
 
+  const bumperCenterGroup = new THREE.Group();
+  bumperCenterGroup.position.set(0, 0.72, -2.68);
+  const bumperCenterMesh = new THREE.Mesh(
+    createRoundedBoxGeometry(0.88, 0.52, 0.42, 0.06, 3),
+    matteBumperMat
+  );
+  bumperCenterGroup.add(bumperCenterMesh);
+  cabinSuspensionGroup.add(bumperCenterGroup);
+
+  const bumperRightGroup = new THREE.Group();
+  bumperRightGroup.position.set(0.86, 0.72, -2.68);
+  const bumperRightMesh = new THREE.Mesh(
+    createRoundedBoxGeometry(0.84, 0.52, 0.42, 0.06, 3),
+    matteBumperMat
+  );
+  bumperRightGroup.add(bumperRightMesh);
+  cabinSuspensionGroup.add(bumperRightGroup);
+
+  const bullbarGroup = new THREE.Group();
+  bullbarGroup.position.set(0, 0.85, -2.92);
   const bullbarLower = new THREE.Mesh(
     new THREE.CylinderGeometry(0.042, 0.042, 2.28, 14).rotateZ(Math.PI / 2),
     chromeMat
   );
-  bullbarLower.position.set(0, 0.62, -2.92);
-  cabinSuspensionGroup.add(bullbarLower);
+  bullbarLower.position.set(0, -0.23, 0);
+  bullbarGroup.add(bullbarLower);
 
   const bullbarUpper = new THREE.Mesh(
     new THREE.CylinderGeometry(0.038, 0.038, 1.72, 14).rotateZ(Math.PI / 2),
     chromeMat
   );
-  bullbarUpper.position.set(0, 1.08, -2.92);
-  cabinSuspensionGroup.add(bullbarUpper);
+  bullbarUpper.position.set(0, 0.23, 0);
+  bullbarGroup.add(bullbarUpper);
 
   for (const bx of [-0.72, 0.72]) {
     const bullbarUpright = new THREE.Mesh(
       new THREE.CylinderGeometry(0.04, 0.04, 0.56, 12),
       chromeMat
     );
-    bullbarUpright.position.set(bx, 0.85, -2.92);
-    cabinSuspensionGroup.add(bullbarUpright);
+    bullbarUpright.position.set(bx, 0, 0);
+    bullbarGroup.add(bullbarUpright);
   }
+  cabinSuspensionGroup.add(bullbarGroup);
 
-  const frontGrille = new THREE.Mesh(
+  const frontGrilleMesh = new THREE.Mesh(
     createRoundedBoxGeometry(1.74, 0.92, 0.12, 0.04, 3),
     cabSecondaryPaintMat
   );
-  frontGrille.position.set(0, 1.42, -2.72);
-  cabinSuspensionGroup.add(frontGrille);
+  frontGrilleMesh.position.set(0, 1.42, -2.72);
+  cabinSuspensionGroup.add(frontGrilleMesh);
 
   // Animated 9-Blade Radiator Cooling Fan behind Front Grille
   const coolingFanGroup = new THREE.Group();
@@ -932,6 +1027,7 @@ export function buildPlayerTruckAndTrailer(
   }
   cabinSuspensionGroup.add(coolingFanGroup);
 
+  const grilleSlats: THREE.Mesh[] = [];
   for (let s = 0; s < 6; s++) {
     const slat = new THREE.Mesh(
       createRoundedBoxGeometry(1.62, 0.048, 0.14, 0.015, 2),
@@ -939,6 +1035,23 @@ export function buildPlayerTruckAndTrailer(
     );
     slat.position.set(0, 1.06 + s * 0.14, -2.74);
     cabinSuspensionGroup.add(slat);
+    grilleSlats.push(slat);
+  }
+
+  // Radiator Coolant Steam & Engine Damage Smoke Plumes behind Front Grille
+  const radiatorSmokePuffs: THREE.Mesh[] = [];
+  for (let p = 0; p < 6; p++) {
+    const rMat = new THREE.MeshBasicMaterial({
+      color: 0xe2e8f0,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+    });
+    const rPuff = new THREE.Mesh(puffGeo, rMat);
+    rPuff.position.set(0, 1.45, -2.75);
+    rPuff.visible = false;
+    cabinSuspensionGroup.add(rPuff);
+    radiatorSmokePuffs.push(rPuff);
   }
 
   const plateMesh = new THREE.Mesh(
@@ -948,28 +1061,38 @@ export function buildPlayerTruckAndTrailer(
   plateMesh.position.set(0, 0.56, -2.9);
   cabinSuspensionGroup.add(plateMesh);
 
-  for (const side of [-1, 1]) {
+  const buildHeadlightCluster = (
+    side: -1 | 1,
+    lensMat: THREE.MeshStandardMaterial
+  ): THREE.Group => {
+    const hlGroup = new THREE.Group();
+    hlGroup.position.set(side * 0.98, 0.92, -2.72);
+
     const bezel = new THREE.Mesh(
       createRoundedBoxGeometry(0.44, 0.28, 0.1, 0.03, 2),
       cabSecondaryPaintMat
     );
-    bezel.position.set(side * 0.98, 0.92, -2.72);
-    cabinSuspensionGroup.add(bezel);
+    hlGroup.add(bezel);
 
     const hlLens = new THREE.Mesh(
       createRoundedBoxGeometry(0.36, 0.2, 0.11, 0.02, 2),
-      headlightLensMat
+      lensMat
     );
-    hlLens.position.set(side * 0.96, 0.92, -2.74);
-    cabinSuspensionGroup.add(hlLens);
+    hlLens.position.set(side * -0.02, 0, -0.02);
+    hlGroup.add(hlLens);
 
     const indMesh = new THREE.Mesh(
       createRoundedBoxGeometry(0.16, 0.2, 0.12, 0.02, 2),
       side === -1 ? indicatorLeftMat : indicatorRightMat
     );
-    indMesh.position.set(side * 1.21, 0.92, -2.71);
-    cabinSuspensionGroup.add(indMesh);
-  }
+    indMesh.position.set(side * 0.23, 0, 0.01);
+    hlGroup.add(indMesh);
+
+    cabinSuspensionGroup.add(hlGroup);
+    return hlGroup;
+  };
+  const headlightLeftGroup = buildHeadlightCluster(-1, headlightLeftLensMat);
+  const headlightRightGroup = buildHeadlightCluster(1, headlightRightLensMat);
 
   const headlightLeftSpot = new THREE.SpotLight(0xfffbeb, 0, 95, Math.PI / 5, 0.45, 1.35);
   headlightLeftSpot.position.set(-0.98, 0.95, -2.82);
@@ -983,19 +1106,46 @@ export function buildPlayerTruckAndTrailer(
   cabinSuspensionGroup.add(headlightRightSpot);
   cabinSuspensionGroup.add(headlightRightSpot.target);
 
-  const createWingMirrorAssembly = (side: -1 | 1): THREE.Mesh => {
+  const bareSteelScarMat = new THREE.MeshStandardMaterial({
+    color: 0x334155,
+    metalness: 0.88,
+    roughness: 0.42,
+  });
+  const deepCrumpleCraterMat = new THREE.MeshStandardMaterial({
+    color: 0x0f172a,
+    metalness: 0.65,
+    roughness: 0.82,
+  });
+  const primerScrapeMat = new THREE.MeshStandardMaterial({
+    color: 0x94a3b8,
+    metalness: 0.75,
+    roughness: 0.35,
+  });
+
+  const createWingMirrorAssembly = (
+    side: -1 | 1
+  ): {
+    mirrorFace: THREE.Mesh;
+    mirrorGroup: THREE.Group;
+    mirrorCrackMesh: THREE.Mesh;
+    mirrorCrackCanvas: HTMLCanvasElement;
+    mirrorCrackTex: THREE.CanvasTexture;
+    mirrorDentGroup: THREE.Group;
+  } => {
     const mirrorGroup = new THREE.Group();
-    for (const ay of [2.64, 2.12]) {
+    mirrorGroup.position.set(side * 1.32, 2.38, -2.38);
+
+    for (const ay of [0.26, -0.26]) {
       const arm = new THREE.Mesh(
         new THREE.CylinderGeometry(0.018, 0.018, 0.36, 8).rotateZ(Math.PI / 2),
         cabSecondaryPaintMat
       );
-      arm.position.set(side * 1.32, ay, -2.38);
+      arm.position.set(0, ay, 0);
       mirrorGroup.add(arm);
     }
 
     const headPivot = new THREE.Group();
-    headPivot.position.set(side * 1.46, 2.38, -2.36);
+    headPivot.position.set(side * 0.14, 0, 0.02);
     headPivot.rotation.y = side * -0.18;
 
     const housing = new THREE.Mesh(
@@ -1011,16 +1161,197 @@ export function buildPlayerTruckAndTrailer(
     mirrorFace.position.set(0, 0, 0.062);
     headPivot.add(mirrorFace);
 
+    // 3D Shattered Mirror Glass Fracture Overlay directly on the live rear-view mirror face
+    const mirrorCrackCanvas = document.createElement('canvas');
+    mirrorCrackCanvas.width = 256;
+    mirrorCrackCanvas.height = 512;
+    const mirrorCrackTex = new THREE.CanvasTexture(mirrorCrackCanvas);
+    mirrorCrackTex.colorSpace = THREE.SRGBColorSpace;
+    const mirrorCrackMat = new THREE.MeshBasicMaterial({
+      map: mirrorCrackTex,
+      transparent: true,
+      opacity: 0.95,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const mirrorCrackMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.155, 0.54),
+      mirrorCrackMat
+    );
+    mirrorCrackMesh.position.set(0, 0, 0.064);
+    mirrorCrackMesh.renderOrder = 8;
+    mirrorCrackMesh.visible = false;
+    headPivot.add(mirrorCrackMesh);
+
+    // 3D Outer Mirror Housing Dents, Bare-Steel Scrapes & Buckled Cap
+    const mirrorDentGroup = new THREE.Group();
+    mirrorDentGroup.visible = false;
+    const housingCrater = new THREE.Mesh(
+      new THREE.DodecahedronGeometry(0.08, 1),
+      deepCrumpleCraterMat
+    );
+    housingCrater.scale.set(1.1, 1.6, 0.35);
+    housingCrater.position.set(side * 0.04, 0.03, -0.058);
+    mirrorDentGroup.add(housingCrater);
+
+    for (let s = 0; s < 3; s++) {
+      const scrape = new THREE.Mesh(
+        new THREE.BoxGeometry(0.14, 0.018, 0.02),
+        s % 2 === 0 ? primerScrapeMat : bareSteelScarMat
+      );
+      scrape.position.set(side * 0.02, -0.14 + s * 0.13, -0.062);
+      scrape.rotation.z = (s - 1) * 0.28;
+      mirrorDentGroup.add(scrape);
+    }
+    headPivot.add(mirrorDentGroup);
+
     mirrorGroup.add(headPivot);
     cabinSuspensionGroup.add(mirrorGroup);
-    return mirrorFace;
+    return {
+      mirrorFace,
+      mirrorGroup,
+      mirrorCrackMesh,
+      mirrorCrackCanvas,
+      mirrorCrackTex,
+      mirrorDentGroup,
+    };
   };
-  const leftMirrorMesh = createWingMirrorAssembly(-1);
-  const rightMirrorMesh = createWingMirrorAssembly(1);
+  const leftMirrorBuilt = createWingMirrorAssembly(-1);
+  const rightMirrorBuilt = createWingMirrorAssembly(1);
+  const leftMirrorMesh = leftMirrorBuilt.mirrorFace;
+  const rightMirrorMesh = rightMirrorBuilt.mirrorFace;
+  const leftMirrorGroup = leftMirrorBuilt.mirrorGroup;
+  const rightMirrorGroup = rightMirrorBuilt.mirrorGroup;
+  const leftMirrorCrackMesh = leftMirrorBuilt.mirrorCrackMesh;
+  const rightMirrorCrackMesh = rightMirrorBuilt.mirrorCrackMesh;
+  const leftMirrorCrackCanvas = leftMirrorBuilt.mirrorCrackCanvas;
+  const rightMirrorCrackCanvas = rightMirrorBuilt.mirrorCrackCanvas;
+  const leftMirrorCrackTex = leftMirrorBuilt.mirrorCrackTex;
+  const rightMirrorCrackTex = rightMirrorBuilt.mirrorCrackTex;
+  const leftMirrorDentGroup = leftMirrorBuilt.mirrorDentGroup;
+  const rightMirrorDentGroup = rightMirrorBuilt.mirrorDentGroup;
 
   const mirrorCameraAnchor = new THREE.Object3D();
   mirrorCameraAnchor.position.set(1.48, 2.38, -2.25);
   cabinSuspensionGroup.add(mirrorCameraAnchor);
+
+  // Record base vertex positions of primary cab & bumper meshes for real 3D vertex dent deformation
+  const registerDeformable = (
+    mesh: THREE.Mesh,
+    localOffset: THREE.Vector3
+  ): DeformableMeshTarget => {
+    mesh.geometry = mesh.geometry.clone();
+    const posAttr = mesh.geometry.attributes.position as THREE.BufferAttribute;
+    return {
+      mesh,
+      origPositions: new Float32Array(posAttr.array as ArrayLike<number>),
+      localOffset,
+    };
+  };
+  const deformableTargets: DeformableMeshTarget[] = [
+    registerDeformable(lowerCab, new THREE.Vector3(0, 0, 0)),
+    registerDeformable(frontGrilleMesh, new THREE.Vector3(0, 1.42, -2.72)),
+    registerDeformable(bumperLeftMesh, new THREE.Vector3(-0.86, 0.72, -2.68)),
+    registerDeformable(bumperCenterMesh, new THREE.Vector3(0, 0.72, -2.68)),
+    registerDeformable(bumperRightMesh, new THREE.Vector3(0.86, 0.72, -2.68)),
+  ];
+
+  // ============================================================================
+  // 2B. Super-Detailed 3-Stage Localized 3D Collision Dent, Crease & Scrape Meshes
+  //     + 3D Metallic Collision Sparks Emitter
+  // ============================================================================
+
+  const buildZoneDentStageGroup = (
+    parent: THREE.Object3D,
+    pos: [number, number, number],
+    rotY: number
+  ): ZoneDentStageMeshes => {
+    const group = new THREE.Group();
+    group.position.set(pos[0], pos[1], pos[2]);
+    group.rotation.y = rotY;
+    group.visible = false;
+
+    // Stage 1 (> 0.05): Bare-steel paint transfer scrapes & initial concave ding
+    const stage1Scrapes = new THREE.Group();
+    for (let s = 0; s < 4; s++) {
+      const streak = new THREE.Mesh(
+        new THREE.BoxGeometry(0.42 - s * 0.05, 0.028, 0.03),
+        s % 2 === 0 ? primerScrapeMat : bareSteelScarMat
+      );
+      streak.position.set((s - 1.5) * 0.08, (s - 1.5) * 0.07, 0.015);
+      streak.rotation.z = (s % 2 === 0 ? 1 : -1) * 0.16;
+      stage1Scrapes.add(streak);
+    }
+    const shallowDing = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(0.16, 1),
+      bareSteelScarMat
+    );
+    shallowDing.scale.set(1.3, 0.85, 0.22);
+    stage1Scrapes.add(shallowDing);
+    group.add(stage1Scrapes);
+
+    // Stage 2 (> 0.28): Deep buckled sheet-metal crease ridges & dark steel crater
+    const stage2Creases = new THREE.Group();
+    const crater = new THREE.Mesh(
+      new THREE.DodecahedronGeometry(0.26, 1),
+      deepCrumpleCraterMat
+    );
+    crater.scale.set(1.35, 0.95, 0.28);
+    stage2Creases.add(crater);
+
+    for (let r = 0; r < 3; r++) {
+      const ridge = new THREE.Mesh(
+        createRoundedBoxGeometry(0.48, 0.055, 0.07, 0.015, 2),
+        bareSteelScarMat
+      );
+      ridge.position.set((r - 1) * 0.06, (r - 1) * 0.11, 0.03);
+      ridge.rotation.set(0.2 * r, -0.15, (r - 1) * 0.34);
+      stage2Creases.add(ridge);
+    }
+    group.add(stage2Creases);
+
+    // Stage 3 (> 0.55): Severe crumpled steel concavity & jagged torn panel lip
+    const stage3Crumple = new THREE.Group();
+    for (let c = 0; c < 4; c++) {
+      const shard = new THREE.Mesh(
+        new THREE.ConeGeometry(0.14, 0.36, 5),
+        c % 2 === 0 ? deepCrumpleCraterMat : bareSteelScarMat
+      );
+      shard.position.set((c - 1.5) * 0.12, (c % 2 === 0 ? 1 : -1) * 0.09, 0.04);
+      shard.rotation.set(0.6 + c * 0.3, 0.4, c * 0.85);
+      shard.scale.set(1, 1, 0.35);
+      stage3Crumple.add(shard);
+    }
+    group.add(stage3Crumple);
+
+    parent.add(group);
+    return { group, stage1Scrapes, stage2Creases, stage3Crumple };
+  };
+
+  // Note: trailerRoot is created later, so we'll attach rear dent group once trailerRoot exists
+  const sparkCount = 54;
+  const sparkPositions = new Float32Array(sparkCount * 3);
+  const sparkVelocities = new Float32Array(sparkCount * 3);
+  for (let i = 0; i < sparkCount; i++) {
+    const theta = (i / sparkCount) * Math.PI * 2 + (i % 5) * 0.3;
+    const speed = 2.8 + (i % 7) * 1.15;
+    sparkVelocities[i * 3] = Math.cos(theta) * speed;
+    sparkVelocities[i * 3 + 1] = 1.8 + (i % 4) * 1.25;
+    sparkVelocities[i * 3 + 2] = Math.sin(theta) * speed * 0.85 - 1.2;
+  }
+  const sparkGeo = new THREE.BufferGeometry();
+  sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPositions, 3));
+  const sparkMat = new THREE.PointsMaterial({
+    color: 0xfbbf24,
+    size: 3.5,
+    sizeAttenuation: false,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+  });
+  const sparkParticles = new THREE.Points(sparkGeo, sparkMat);
+  sparkParticles.visible = false;
+  tractorRoot.add(sparkParticles);
 
   // ============================================================================
   // 3. AAA First-Person Right-Hand-Drive (RHD) Cockpit Interior
@@ -1912,6 +2243,18 @@ export function buildPlayerTruckAndTrailer(
     trailerWheelMeshes.push(tr);
   }
 
+  const zoneDentGroups: Record<DamageZoneId, ZoneDentStageMeshes> = {
+    front_left: buildZoneDentStageGroup(cabinSuspensionGroup, [-0.92, 1.18, -2.76], Math.PI),
+    front_center: buildZoneDentStageGroup(cabinSuspensionGroup, [0.0, 1.34, -2.79], Math.PI),
+    front_right: buildZoneDentStageGroup(cabinSuspensionGroup, [0.92, 1.18, -2.76], Math.PI),
+    side_left: buildZoneDentStageGroup(cabinSuspensionGroup, [-1.25, 1.42, -1.68], -Math.PI / 2),
+    side_right: buildZoneDentStageGroup(cabinSuspensionGroup, [1.25, 1.42, -1.68], Math.PI / 2),
+    rear:
+      truckModelId === 'ashok_leyland_3520'
+        ? buildZoneDentStageGroup(tractorRoot, [0.0, 1.72, 4.78], 0)
+        : buildZoneDentStageGroup(trailerRoot, [0.0, 1.72, 5.95], 0),
+  };
+
   return {
     truckModelId,
     tractorRoot,
@@ -1931,7 +2274,11 @@ export function buildPlayerTruckAndTrailer(
     trailerWheelMeshes,
     headlightLeftSpot,
     headlightRightSpot,
-    headlightLensMat,
+    headlightLeftLensMat,
+    headlightRightLensMat,
+    headlightLeftGroup,
+    headlightRightGroup,
+    cabinAmbientLight,
     brakeLightMat,
     indicatorLeftMat,
     indicatorRightMat,
@@ -1939,15 +2286,360 @@ export function buildPlayerTruckAndTrailer(
     mirrorCameraAnchor,
     rightMirrorMesh,
     leftMirrorMesh,
+    leftMirrorGroup,
+    rightMirrorGroup,
+    leftMirrorCrackMesh,
+    rightMirrorCrackMesh,
+    leftMirrorCrackCanvas,
+    rightMirrorCrackCanvas,
+    leftMirrorCrackTex,
+    rightMirrorCrackTex,
+    leftMirrorDentGroup,
+    rightMirrorDentGroup,
+    windshieldDamageMesh,
+    windshieldCrackCanvas,
+    windshieldCrackTex,
+    lastSyncedDamageSignature: '',
+    deformableTargets,
     coolingFanGroup,
     exhaustPuffs,
+    radiatorSmokePuffs,
+    bumperLeftGroup,
+    bumperCenterGroup,
+    bumperRightGroup,
+    bullbarGroup,
+    frontGrilleMesh,
+    grilleSlats,
+    plateMesh,
+    zoneDentGroups,
+    sparkParticles,
+    sparkVelocities,
     cabPaintMat,
   };
 }
 
 /**
+ * Renders diegetic 3D laminated safety-glass fractures onto the 3D Windshield Mesh's CanvasTexture
+ * (`1024x512`). Because `windshieldDamageMesh.rotation.x = Math.PI + 0.15`, local +X is RHD Right
+ * (`u = normX`) and local Y is inverted (`v = 1 - normY`).
+ */
+function redraw3DWindshieldDamageCanvas(
+  canvas: HTMLCanvasElement,
+  tex: THREE.CanvasTexture,
+  state: TruckPhysicsState
+): void {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const W = canvas.width;
+  const H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  if (!state.windshieldCracks || state.windshieldCracks.length === 0) {
+    tex.needsUpdate = true;
+    return;
+  }
+
+  // Subtle corner edge stress crazing around the windshield rubber gasket on any glass impact
+  const totalCrackSeverity = Math.min(
+    1,
+    state.windshieldCracks.reduce((acc, c) => acc + c.intensity * 0.45, 0)
+  );
+  const edgeGrad = ctx.createRadialGradient(W * 0.5, H * 0.5, W * 0.25, W * 0.5, H * 0.5, W * 0.56);
+  edgeGrad.addColorStop(0, 'rgba(226, 232, 240, 0)');
+  edgeGrad.addColorStop(1, `rgba(226, 232, 240, ${(totalCrackSeverity * 0.18).toFixed(3)})`);
+  ctx.fillStyle = edgeGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  for (const crack of state.windshieldCracks) {
+    const cx = crack.normX * W;
+    // Flip Y because windshield plane is rotated by Math.PI around X
+    const cy = (1 - crack.normY) * H;
+    const maxR =
+      (0.11 + crack.intensity * 0.16 + Math.min(0.14, crack.nthCollision * 0.03)) * 420;
+    const rayCount = 12 + Math.min(16, crack.nthCollision * 3 + Math.round(crack.intensity * 8));
+    const ringCount = 3 + Math.min(5, Math.floor(crack.nthCollision + crack.intensity * 2.5));
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // 1. Frosted Laminated PVB Interlayer Impact Bullseye + Crushed Glass Spall Halo
+    const spallGrad = ctx.createRadialGradient(0, 0, 2, 0, 0, Math.max(18, maxR * 0.22));
+    spallGrad.addColorStop(0, `rgba(248, 250, 252, ${(0.72 + crack.intensity * 0.22).toFixed(2)})`);
+    spallGrad.addColorStop(0.35, 'rgba(226, 232, 240, 0.48)');
+    spallGrad.addColorStop(0.75, 'rgba(148, 163, 184, 0.18)');
+    spallGrad.addColorStop(1, 'rgba(15, 23, 42, 0)');
+    ctx.fillStyle = spallGrad;
+    ctx.beginPath();
+    ctx.arc(0, 0, Math.max(18, maxR * 0.22), 0, Math.PI * 2);
+    ctx.fill();
+
+    // Inner crushed glass core
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.strokeStyle = 'rgba(15, 23, 42, 0.7)';
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.arc(0, 0, Math.max(6, maxR * 0.045), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // 2. Concentric Laminated Spiderweb Stress Rings
+    for (let rIdx = 0; rIdx < ringCount; rIdx++) {
+      const rr = maxR * (0.14 + ((rIdx + 1) / (ringCount + 1)) * 0.72);
+      ctx.beginPath();
+      for (let i = 0; i <= rayCount; i++) {
+        const ang =
+          (i / rayCount) * Math.PI * 2 + Math.sin(crack.seed * 0.13 + i * 1.7) * 0.11;
+        const jitterR = rr * (0.86 + ((crack.seed + i * 19 + rIdx * 7) % 17) * 0.015);
+        const px = Math.cos(ang) * jitterR;
+        const py = Math.sin(ang) * jitterR;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.strokeStyle = 'rgba(15, 23, 42, 0.55)';
+      ctx.lineWidth = Math.max(1.8, 3.0 - rIdx * 0.35);
+      ctx.stroke();
+
+      ctx.strokeStyle = `rgba(248, 250, 252, ${Math.max(0.35, 0.86 - rIdx * 0.11).toFixed(2)})`;
+      ctx.lineWidth = Math.max(0.9, 1.8 - rIdx * 0.22);
+      ctx.stroke();
+    }
+
+    // 3. Primary Radiating Fracture Rays + Secondary Bifurcating Glass Forks
+    for (let idx = 0; idx < rayCount; idx++) {
+      const baseAngle =
+        (idx / rayCount) * Math.PI * 2 + ((crack.seed + idx * 31) % 19) * 0.018;
+      const rayLen = maxR * (0.55 + ((crack.seed + idx * 23) % 29) / 50);
+      const mid1R = rayLen * 0.36;
+      const mid2R = rayLen * 0.72;
+      const kink1 = baseAngle + (idx % 2 === 0 ? 1 : -1) * 0.07;
+      const kink2 = baseAngle - (idx % 3 === 0 ? 1 : -1) * 0.05;
+
+      const x1 = Math.cos(kink1) * mid1R;
+      const y1 = Math.sin(kink1) * mid1R;
+      const x2 = Math.cos(kink2) * mid2R;
+      const y2 = Math.sin(kink2) * mid2R;
+      const x3 = Math.cos(baseAngle) * rayLen;
+      const y3 = Math.sin(baseAngle) * rayLen;
+
+      // Dark refractive shadow edge
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(x1 + 1.2, y1 + 1.2);
+      ctx.lineTo(x2 + 1.2, y2 + 1.2);
+      ctx.lineTo(x3 + 1.2, y3 + 1.2);
+      ctx.strokeStyle = 'rgba(15, 23, 42, 0.68)';
+      ctx.lineWidth = idx % 3 === 0 ? 3.4 : 2.2;
+      ctx.stroke();
+
+      // Bright specular glass fracture edge
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.lineTo(x3, y3);
+      ctx.strokeStyle = 'rgba(248, 250, 252, 0.94)';
+      ctx.lineWidth = idx % 3 === 0 ? 2.1 : 1.3;
+      ctx.stroke();
+
+      // Secondary bifurcating fork
+      const forkAngle = baseAngle + (idx % 2 === 0 ? 0.34 : -0.34);
+      const fx = x2 + Math.cos(forkAngle) * (rayLen * 0.36);
+      const fy = y2 + Math.sin(forkAngle) * (rayLen * 0.36);
+      ctx.beginPath();
+      ctx.moveTo(x2, y2);
+      ctx.lineTo(fx, fy);
+      ctx.strokeStyle = 'rgba(226, 232, 240, 0.82)';
+      ctx.lineWidth = 1.1;
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  tex.needsUpdate = true;
+}
+
+/**
+ * Renders shattered silvered rear-view wing mirror cracks, missing dark glass backing shards,
+ * and radial fracture lines onto the 3D Left or Right Side Mirror CanvasTexture (`256x512`).
+ */
+function redraw3DSideMirrorDamageCanvas(
+  canvas: HTMLCanvasElement,
+  tex: THREE.CanvasTexture,
+  mirrorDmg: number,
+  sideSeed: number
+): void {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const W = canvas.width;
+  const H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  if (mirrorDmg <= 0.04) {
+    tex.needsUpdate = true;
+    return;
+  }
+
+  const cx = W * (sideSeed < 0 ? 0.34 : 0.66);
+  const cy = H * 0.46;
+  const maxR = Math.max(W, H) * (0.42 + mirrorDmg * 0.58);
+  const rayCount = 11 + Math.round(mirrorDmg * 14);
+  const ringCount = 2 + Math.floor(mirrorDmg * 4);
+
+  // 1. Missing silvered mirror backing shard wedges at outer edge on heavy hits (> 0.35)
+  if (mirrorDmg > 0.3) {
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
+    ctx.beginPath();
+    if (sideSeed > 0) {
+      ctx.moveTo(W, 0);
+      ctx.lineTo(W * (1 - mirrorDmg * 0.38), H * 0.14);
+      ctx.lineTo(W, H * 0.36);
+    } else {
+      ctx.moveTo(0, 0);
+      ctx.lineTo(W * (mirrorDmg * 0.38), H * 0.14);
+      ctx.lineTo(0, H * 0.36);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // 2. Frosted silvered mirror impact bullseye
+  const grad = ctx.createRadialGradient(cx, cy, 3, cx, cy, maxR * 0.28);
+  grad.addColorStop(0, 'rgba(248, 250, 252, 0.92)');
+  grad.addColorStop(0.4, 'rgba(203, 213, 225, 0.55)');
+  grad.addColorStop(1, 'rgba(15, 23, 42, 0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(cx, cy, maxR * 0.28, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 3. Concentric stress fracture rings
+  for (let r = 0; r < ringCount; r++) {
+    const rr = maxR * (0.16 + ((r + 1) / (ringCount + 1)) * 0.68);
+    ctx.beginPath();
+    for (let i = 0; i <= rayCount; i++) {
+      const ang = (i / rayCount) * Math.PI * 2;
+      const jr = rr * (0.88 + ((i * 13 + r * 7) % 11) * 0.022);
+      const px = cx + Math.cos(ang) * jr;
+      const py = cy + Math.sin(ang) * jr;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = 'rgba(15, 23, 42, 0.72)';
+    ctx.lineWidth = 2.6;
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(248, 250, 252, 0.88)';
+    ctx.lineWidth = 1.3;
+    ctx.stroke();
+  }
+
+  // 4. Radial silvered mirror fracture lines
+  for (let i = 0; i < rayCount; i++) {
+    const ang = (i / rayCount) * Math.PI * 2 + (i % 3) * 0.08;
+    const len = maxR * (0.65 + ((i * 17) % 13) * 0.04);
+    const mx = cx + Math.cos(ang + 0.06) * (len * 0.48);
+    const my = cy + Math.sin(ang + 0.06) * (len * 0.48);
+    const ex = cx + Math.cos(ang) * len;
+    const ey = cy + Math.sin(ang) * len;
+
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(mx + 1.5, my + 1.5);
+    ctx.lineTo(ex + 1.5, ey + 1.5);
+    ctx.strokeStyle = 'rgba(2, 6, 23, 0.78)';
+    ctx.lineWidth = 2.8;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(mx, my);
+    ctx.lineTo(ex, ey);
+    ctx.strokeStyle = 'rgba(248, 250, 252, 0.95)';
+    ctx.lineWidth = i % 2 === 0 ? 1.8 : 1.1;
+    ctx.stroke();
+  }
+
+  tex.needsUpdate = true;
+}
+
+/**
+ * Directly deforms the 3D vertex buffers of the cab shell (`lowerCab`), radiator grille,
+ * and 3-section front bumper inward around damaged collision zones for genuine 3D sheet-metal crumpling.
+ */
+function deform3DCabAndBumperVertices(
+  targets: DeformableMeshTarget[],
+  state: TruckPhysicsState
+): void {
+  const zoneCenters: Array<{
+    id: DamageZoneId;
+    cx: number;
+    cy: number;
+    cz: number;
+    radius: number;
+    inwardX: number;
+    inwardY: number;
+    inwardZ: number;
+  }> = [
+    { id: 'front_left', cx: -0.96, cy: 1.18, cz: -2.72, radius: 1.05, inwardX: 0.18, inwardY: -0.1, inwardZ: 0.34 },
+    { id: 'front_center', cx: 0.0, cy: 1.25, cz: -2.76, radius: 1.12, inwardX: 0.0, inwardY: -0.08, inwardZ: 0.36 },
+    { id: 'front_right', cx: 0.96, cy: 1.18, cz: -2.72, radius: 1.05, inwardX: -0.18, inwardY: -0.1, inwardZ: 0.34 },
+    { id: 'side_left', cx: -1.24, cy: 1.48, cz: -1.68, radius: 1.15, inwardX: 0.32, inwardY: -0.06, inwardZ: 0.06 },
+    { id: 'side_right', cx: 1.24, cy: 1.48, cz: -1.68, radius: 1.15, inwardX: -0.32, inwardY: -0.06, inwardZ: 0.06 },
+  ];
+
+  for (const target of targets) {
+    const posAttr = target.mesh.geometry.attributes.position as THREE.BufferAttribute;
+    const orig = target.origPositions;
+    const off = target.localOffset;
+    const count = posAttr.count;
+
+    for (let i = 0; i < count; i++) {
+      const ox = orig[i * 3];
+      const oy = orig[i * 3 + 1];
+      const oz = orig[i * 3 + 2];
+
+      // Approximate vertex position in cab suspension local coordinates
+      const wx = ox + off.x;
+      const wy = oy + off.y;
+      const wz = oz + off.z;
+
+      let dxTotal = 0;
+      let dyTotal = 0;
+      let dzTotal = 0;
+
+      for (const zc of zoneCenters) {
+        const dmg = state.zoneDamage[zc.id];
+        if (dmg <= 0.01) continue;
+        const distSq =
+          (wx - zc.cx) * (wx - zc.cx) +
+          (wy - zc.cy) * (wy - zc.cy) +
+          (wz - zc.cz) * (wz - zc.cz);
+        const rSq = zc.radius * zc.radius;
+        if (distSq < rSq) {
+          const falloff = 1 - Math.sqrt(distSq) / zc.radius;
+          const ripple =
+            0.72 + 0.45 * Math.sin(wx * 14.5 + wy * 19.2 + wz * 16.8 + state.collisionCount);
+          const mag = dmg * falloff * falloff * ripple;
+          dxTotal += zc.inwardX * mag;
+          dyTotal += zc.inwardY * mag;
+          dzTotal += zc.inwardZ * mag;
+        }
+      }
+
+      posAttr.setXYZ(i, ox + dxTotal, oy + dyTotal, oz + dzTotal);
+    }
+
+    posAttr.needsUpdate = true;
+    target.mesh.geometry.computeVertexNormals();
+  }
+}
+
+/**
  * Synchronizes the 3D Tractor, Cabin Suspension, Steering Wheel, Interactive Gear Lever,
- * Indicator Stalk, Footwell Pedals, Instrument Dials, Lights, Fan, Exhaust, and Trailer meshes.
+ * Indicator Stalk, Footwell Pedals, Instrument Dials, Lights, Fan, Exhaust, Trailer,
+ * and Progressive Location-Specific 3D Collision Damage (3D Vertex Dents, 3D Windshield Cracks,
+ * 3D Side Mirror Cracks & Dents, Bent Bumper/Grille/Mirrors, Flickering Headlights,
+ * Radiator Steam/Smoke, and 3D Collision Sparks).
  */
 export function syncPlayerRigMeshes(
   meshes: PlayerRigMeshes,
@@ -2002,6 +2694,206 @@ export function syncPlayerRigMeshes(
     (puff.material as THREE.MeshBasicMaterial).opacity = (1 - t) * 0.24 * loadFactor;
   }
 
+  // ============================================================================
+  // PROGRESSIVE 3D PHYSICAL DAMAGE DEFORMATION, 3D WINDSHIELD & MIRROR CRACKS
+  // ============================================================================
+  const flDmg = state.zoneDamage.front_left;
+  const fcDmg = state.zoneDamage.front_center;
+  const frDmg = state.zoneDamage.front_right;
+  const slDmg = state.zoneDamage.side_left;
+  const srDmg = state.zoneDamage.side_right;
+  const mlDmg = state.mirrorLeftDamage;
+  const mrDmg = state.mirrorRightDamage;
+
+  const damageSignature = `${state.collisionCount}:${flDmg.toFixed(2)}:${fcDmg.toFixed(2)}:${frDmg.toFixed(2)}:${slDmg.toFixed(2)}:${srDmg.toFixed(2)}:${mlDmg.toFixed(2)}:${mrDmg.toFixed(2)}:${state.windshieldCracks.length}`;
+  if (meshes.lastSyncedDamageSignature !== damageSignature) {
+    meshes.lastSyncedDamageSignature = damageSignature;
+
+    // A. Redraw 3D Windshield Laminated Glass Cracks on the 3D Windshield Mesh
+    meshes.windshieldDamageMesh.visible = state.windshieldCracks.length > 0;
+    redraw3DWindshieldDamageCanvas(
+      meshes.windshieldCrackCanvas,
+      meshes.windshieldCrackTex,
+      state
+    );
+
+    // B. Redraw 3D Left & Right Side Wing Mirror Cracks & Toggle 3D Mirror Housing Dents
+    meshes.leftMirrorCrackMesh.visible = mlDmg > 0.04;
+    meshes.leftMirrorDentGroup.visible = mlDmg > 0.08;
+    redraw3DSideMirrorDamageCanvas(
+      meshes.leftMirrorCrackCanvas,
+      meshes.leftMirrorCrackTex,
+      mlDmg,
+      -1
+    );
+
+    meshes.rightMirrorCrackMesh.visible = mrDmg > 0.04;
+    meshes.rightMirrorDentGroup.visible = mrDmg > 0.08;
+    redraw3DSideMirrorDamageCanvas(
+      meshes.rightMirrorCrackCanvas,
+      meshes.rightMirrorCrackTex,
+      mrDmg,
+      1
+    );
+
+    // C. Deform 3D Vertex Buffers of Cab Body, Grille & Bumper Inward at Impact Zones
+    deform3DCabAndBumperVertices(meshes.deformableTargets, state);
+  }
+
+  // 1. Deformable 3-Section Front Bumper & Bullbar
+  meshes.bumperLeftGroup.position.set(
+    -0.86 + flDmg * 0.06,
+    0.72 - flDmg * 0.14,
+    -2.68 + flDmg * 0.18
+  );
+  meshes.bumperLeftGroup.rotation.set(
+    flDmg * 0.22,
+    flDmg * 0.26,
+    flDmg * 0.28
+  );
+
+  meshes.bumperCenterGroup.position.set(
+    0,
+    0.72 - fcDmg * 0.09,
+    -2.68 + fcDmg * 0.16
+  );
+  meshes.bumperCenterGroup.rotation.set(
+    fcDmg * 0.25,
+    (flDmg - frDmg) * 0.12,
+    (frDmg - flDmg) * 0.14
+  );
+
+  meshes.bumperRightGroup.position.set(
+    0.86 - frDmg * 0.06,
+    0.72 - frDmg * 0.14,
+    -2.68 + frDmg * 0.18
+  );
+  meshes.bumperRightGroup.rotation.set(
+    frDmg * 0.22,
+    -frDmg * 0.26,
+    -frDmg * 0.28
+  );
+
+  const frontMaxDmg = Math.max(flDmg, fcDmg, frDmg);
+  meshes.bullbarGroup.position.set(
+    (flDmg - frDmg) * 0.06,
+    0.85 - fcDmg * 0.11,
+    -2.92 + frontMaxDmg * 0.16
+  );
+  meshes.bullbarGroup.rotation.set(
+    -frontMaxDmg * 0.32,
+    (flDmg - frDmg) * 0.22,
+    (frDmg - flDmg) * 0.18
+  );
+
+  // Skew yellow license plate on front impact
+  meshes.plateMesh.position.set(
+    0,
+    0.56 - fcDmg * 0.08,
+    -2.9 + frontMaxDmg * 0.16
+  );
+  meshes.plateMesh.rotation.z = (flDmg * 0.35 - frDmg * 0.35) + fcDmg * 0.28;
+
+  // 2. Individual Chrome Radiator Grille Slats buckle & twist with frontal impacts
+  meshes.frontGrilleMesh.position.z = -2.72 + fcDmg * 0.09;
+  for (let s = 0; s < meshes.grilleSlats.length; s++) {
+    const slat = meshes.grilleSlats[s];
+    const sign = s % 2 === 0 ? 1 : -1;
+    slat.position.z = -2.74 + fcDmg * 0.1 + (s % 3) * frontMaxDmg * 0.025;
+    slat.rotation.z = sign * frontMaxDmg * (0.06 + (s % 3) * 0.045);
+    slat.rotation.y = (flDmg - frDmg) * 0.16 * sign;
+  }
+
+  // 3. Left & Right Wing Mirror Brackets bend inward & sag on side/corner collisions
+  const leftMirrorBend = Math.min(1, Math.max(mlDmg, flDmg * 0.65 + slDmg * 0.95));
+  meshes.leftMirrorGroup.rotation.set(
+    leftMirrorBend * 0.22,
+    leftMirrorBend * 0.54,
+    leftMirrorBend * 0.28
+  );
+  const rightMirrorBend = Math.min(1, Math.max(mrDmg, frDmg * 0.65 + srDmg * 0.95));
+  meshes.rightMirrorGroup.rotation.set(
+    rightMirrorBend * 0.22,
+    -rightMirrorBend * 0.54,
+    -rightMirrorBend * 0.28
+  );
+
+  // 4. Multi-Stage 3D Sculpted Sheet-Metal Dents, Buckled Creases & Scrape Scars per Zone
+  const zones: DamageZoneId[] = [
+    'front_left',
+    'front_center',
+    'front_right',
+    'side_left',
+    'side_right',
+    'rear',
+  ];
+  for (const zId of zones) {
+    const dmg = state.zoneDamage[zId];
+    const dentObj = meshes.zoneDentGroups[zId];
+    if (dmg <= 0.03) {
+      dentObj.group.visible = false;
+    } else {
+      dentObj.group.visible = true;
+      dentObj.stage1Scrapes.visible = dmg > 0.03;
+      dentObj.stage2Creases.visible = dmg > 0.26;
+      dentObj.stage3Crumple.visible = dmg > 0.52;
+      const scaleDepth = 0.6 + dmg * 1.15;
+      dentObj.group.scale.set(0.75 + dmg * 0.45, 0.75 + dmg * 0.45, scaleDepth);
+    }
+  }
+
+  // 5. Radiator Steam & Dark Diesel Engine Smoke Plumes on Frontal Engine Damage
+  for (let i = 0; i < meshes.radiatorSmokePuffs.length; i++) {
+    const rPuff = meshes.radiatorSmokePuffs[i];
+    if (state.engineDamage < 0.12) {
+      rPuff.visible = false;
+    } else {
+      rPuff.visible = true;
+      const t = (phase * 1.35 + i * 0.166) % 1.0;
+      rPuff.position.set(
+        (flDmg - frDmg) * 0.35 + Math.sin(t * 7.5 + i) * 0.22,
+        1.35 + t * 1.85,
+        -2.75 + t * (0.65 + state.speedMs * 0.05)
+      );
+      const scale = (0.32 + t * 1.45) * (0.5 + state.engineDamage * 0.85);
+      rPuff.scale.setScalar(scale);
+      const rMat = rPuff.material as THREE.MeshBasicMaterial;
+      // Shifts from white coolant steam on moderate damage to dark grey/black oily smoke on severe damage
+      rMat.color.setHex(state.engineDamage > 0.55 ? 0x1e293b : 0xcbd5e1);
+      rMat.opacity = (1 - t) * Math.min(0.55, state.engineDamage * 0.62);
+    }
+  }
+
+  // 6. 3D Metallic Collision Sparks Burst at `state.lastImpactLocalPos`
+  const sparkMat = meshes.sparkParticles.material as THREE.PointsMaterial;
+  if (state.sparkBurstTimerS <= 0) {
+    meshes.sparkParticles.visible = false;
+  } else {
+    meshes.sparkParticles.visible = true;
+    // Progress of current spark burst (0 = just impacted, 1 = burst finished)
+    const burstElapsed = Math.max(0.01, 0.85 - state.sparkBurstTimerS);
+    const posAttr = meshes.sparkParticles.geometry.attributes.position as THREE.BufferAttribute;
+    const vels = meshes.sparkVelocities;
+    const origin = state.lastImpactLocalPos;
+    const count = posAttr.count;
+    for (let i = 0; i < count; i++) {
+      const vx = vels[i * 3];
+      const vy = vels[i * 3 + 1];
+      const vz = vels[i * 3 + 2];
+      const rawZ = origin.z + vz * burstElapsed;
+      // Keep frontal collision sparks outside the cab windshield (z <= -2.82)
+      const clampedZ = origin.z < -2.2 ? Math.min(-2.82, rawZ) : rawZ;
+      posAttr.setXYZ(
+        i,
+        origin.x + vx * burstElapsed,
+        Math.max(0.08, origin.y + vy * burstElapsed - 4.9 * burstElapsed * burstElapsed),
+        clampedZ
+      );
+    }
+    posAttr.needsUpdate = true;
+    sparkMat.opacity = Math.min(0.92, state.sparkBurstTimerS * 1.6);
+  }
+
   // Interactive Cabin Detailing (R6):
   // 1. Steering Wheel turns with steering input
   meshes.steeringWheelGroup.rotation.z = state.steerAngleRad * 6.5;
@@ -2037,15 +2929,81 @@ export function syncPlayerRigMeshes(
   const speedFrac = Math.max(0, Math.min(1, state.speedKmh / 120));
   meshes.speedNeedle.rotation.z = (0.5 - speedFrac) * Math.PI * 1.35;
 
-  const beamIntensity = state.headlightsOn ? (state.highBeamOn ? 115 : 58) : 0;
+  // 7. Localized & Flickering Headlights, Bezel Skew & Cabin Dome Light Sputter
+  const nowSec = performance.now() * 0.001;
+  const leftHlDmg = state.headlightLeftDamage;
+  const rightHlDmg = state.headlightRightDamage;
+
+  // Skew headlight bezels and spotlight targets when front corners are dented
+  meshes.headlightLeftGroup.rotation.set(flDmg * 0.22, flDmg * 0.28, -flDmg * 0.18);
+  meshes.headlightRightGroup.rotation.set(frDmg * 0.22, -frDmg * 0.28, frDmg * 0.18);
+  meshes.headlightLeftSpot.target.position.set(
+    -1.2 - flDmg * 4.5,
+    0.1 - flDmg * 2.2,
+    -42
+  );
+  meshes.headlightRightSpot.target.position.set(
+    1.2 + frDmg * 4.5,
+    0.1 - frDmg * 2.2,
+    -42
+  );
+
+  // Compute independent left & right headlight flicker multipliers
+  let leftFlicker = 1.0 - leftHlDmg * 0.42;
+  let rightFlicker = 1.0 - rightHlDmg * 0.42;
+
+  if (state.lightFlickerTimerS > 0) {
+    // Temporary post-collision high-frequency electrical relay sputter
+    const leftHitWeight =
+      state.lastCollisionZone === 'front_left' || state.lastCollisionZone === 'side_left'
+        ? 1.0
+        : state.lastCollisionZone === 'front_center'
+          ? 0.85
+          : 0.45;
+    const rightHitWeight =
+      state.lastCollisionZone === 'front_right' || state.lastCollisionZone === 'side_right'
+        ? 1.0
+        : state.lastCollisionZone === 'front_center'
+          ? 0.85
+          : 0.45;
+
+    const waveL = Math.sin(nowSec * 67) * Math.cos(nowSec * 103);
+    const waveR = Math.sin(nowSec * 73 + 1.4) * Math.cos(nowSec * 89);
+    if (waveL < 0.15 * leftHitWeight) leftFlicker *= waveL < -0.25 ? 0.04 : 0.32;
+    if (waveR < 0.15 * rightHitWeight) rightFlicker *= waveR < -0.25 ? 0.04 : 0.32;
+  } else {
+    // Permanent intermittent filament drop-out when a headlight has sustained significant damage (> 0.32)
+    if (leftHlDmg > 0.32) {
+      const permWaveL = Math.sin(nowSec * 23) * Math.cos(nowSec * 51);
+      if (permWaveL < -0.55 + leftHlDmg * 0.35) leftFlicker *= 0.08;
+    }
+    if (rightHlDmg > 0.32) {
+      const permWaveR = Math.sin(nowSec * 29 + 2.1) * Math.cos(nowSec * 47);
+      if (permWaveR < -0.55 + rightHlDmg * 0.35) rightFlicker *= 0.08;
+    }
+  }
+
+  const baseBeam = state.headlightsOn ? (state.highBeamOn ? 115 : 58) : 0;
   if (!isSoftwareGl) {
-    meshes.headlightLeftSpot.intensity = beamIntensity;
-    meshes.headlightRightSpot.intensity = beamIntensity;
+    meshes.headlightLeftSpot.intensity = baseBeam * Math.max(0, leftFlicker);
+    meshes.headlightRightSpot.intensity = baseBeam * Math.max(0, rightFlicker);
     meshes.headlightLeftSpot.distance = state.highBeamOn ? 135 : 85;
     meshes.headlightRightSpot.distance = state.highBeamOn ? 135 : 85;
   }
-  meshes.headlightLensMat.emissiveIntensity = state.headlightsOn ? 2.4 : 0.4;
-  meshes.brakeLightMat.emissiveIntensity = isBraking ? 2.8 : state.headlightsOn ? 0.85 : 0.25;
+  meshes.headlightLeftLensMat.emissiveIntensity =
+    (state.headlightsOn ? 2.4 : 0.4) * Math.max(0.08, leftFlicker);
+  meshes.headlightRightLensMat.emissiveIntensity =
+    (state.headlightsOn ? 2.4 : 0.4) * Math.max(0.08, rightFlicker);
+
+  // Flicker interior cabin dome light during post-collision electrical shock
+  meshes.cabinAmbientLight.intensity =
+    state.lightFlickerTimerS > 0 ? 0.95 * state.lightFlickerFactor : 0.95;
+
+  meshes.brakeLightMat.emissiveIntensity =
+    (isBraking ? 2.8 : state.headlightsOn ? 0.85 : 0.25) *
+    (state.lightFlickerTimerS > 0 && state.lastCollisionZone === 'rear'
+      ? state.lightFlickerFactor
+      : 1.0);
 
   const leftOn =
     state.indicatorBlinkOn && (state.indicator === 'left' || state.indicator === 'hazard');

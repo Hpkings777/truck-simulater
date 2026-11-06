@@ -10,6 +10,24 @@ import {
 export type TransmissionMode = 'auto' | 'manual';
 export type IndicatorState = 'off' | 'left' | 'right' | 'hazard';
 
+export type DamageZoneId =
+  | 'front_left'
+  | 'front_center'
+  | 'front_right'
+  | 'side_left'
+  | 'side_right'
+  | 'rear';
+
+export interface WindshieldCrackNode {
+  id: number;
+  normX: number; // 0.08..0.92 across windshield/screen
+  normY: number; // 0.14..0.78 vertically
+  intensity: number; // 0.15..1.0 scaled by impact severity & nth collision
+  nthCollision: number; // 1-based collision index when this crack formed
+  zone: DamageZoneId;
+  seed: number;
+}
+
 export interface TruckControlInput {
   throttle: number; // 0..1 (W / ArrowUp)
   brake: number; // 0..1 (S / ArrowDown)
@@ -97,10 +115,41 @@ export interface TruckPhysicsState {
   indicatorBlinkOn: boolean;
   hornActive: boolean;
 
-  // Impact & Juice Feedback
+  // Impact & Juice Feedback + Progressive Temporary & Permanent Per-Haul Damage
   hitstopTimerS: number;
   cameraTrauma: number; // 0..1 decaying trauma
   lastImpactSeverity: number;
+  collisionCount: number; // Nth collision counter for the current haul/run
+  collisionTrigger: number; // Increments on each discrete collision for SFX & burst triggers
+  collisionCooldownS: number; // Prevents duplicate collision counting within the same impact frame
+  lastCollisionZone: DamageZoneId;
+  lastCollisionIntensity: number; // 0..1 intensity of most recent hit
+  lastImpactLocalPos: { x: number; y: number; z: number };
+
+  // Temporary post-collision visual effects (decay over time after each hit)
+  impactFlashTimerS: number; // Directional screen-space shockwave & vignette (0..0.9s)
+  lightFlickerTimerS: number; // Post-impact electrical headlight/cockpit flicker timer (0..6.5s)
+  sparkBurstTimerS: number; // 3D metallic collision spark shower timer (0..0.8s)
+  hudGlitchTimerS: number; // Momentary instrument cluster voltage sag/jitter (0..1.4s)
+  lightFlickerFactor: number; // Instantaneous 0..1 multiplier for flickering lights (1 = normal, <1 = dim/off)
+
+  // Rigid-body collision impulse & cabin spring-damper jolt dynamics
+  impactYawImpulseRadS: number; // Transient angular yaw spin rate from off-center hits
+  impactLateralVelMs: number; // Transient lateral slide velocity from side/corner hits
+  cabinPitchOffset: number; // Dynamic spring-damper cabin pitch jolt (radians)
+  cabinRollOffset: number; // Dynamic spring-damper cabin roll jolt (radians)
+  cabinPitchVel: number; // Angular velocity of cabin pitch jolt (rad/s)
+  cabinRollVel: number; // Angular velocity of cabin roll jolt (rad/s)
+
+  // Permanent per-haul structural & mechanical damage (persists until haul restart)
+  zoneDamage: Record<DamageZoneId, number>; // 0..1 cumulative deformation per body zone
+  headlightLeftDamage: number; // 0..1 left headlamp housing/filament damage
+  headlightRightDamage: number; // 0..1 right headlamp housing/filament damage
+  mirrorLeftDamage: number; // 0..1 left 3D wing mirror glass crack & bracket dent
+  mirrorRightDamage: number; // 0..1 right 3D wing mirror glass crack & bracket dent
+  engineDamage: number; // 0..1 radiator/intercooler & engine damage
+  alignmentPull: number; // -1..1 steering pull from asymmetrical front suspension damage
+  windshieldCracks: WindshieldCrackNode[]; // Cumulative fractures on the 3D truck windshield mesh
 }
 
 export interface GearSpec {
@@ -216,6 +265,242 @@ export function computeEngineTorqueNm(rpm: number, peakTorque = PEAK_TORQUE_NM):
 }
 
 /**
+ * Default local 3D anchor coordinates on the tractor/trailer for each collision zone.
+ */
+const ZONE_LOCAL_IMPACT_POS: Record<DamageZoneId, { x: number; y: number; z: number }> = {
+  front_left: { x: -1.12, y: 0.92, z: -2.85 },
+  front_center: { x: 0.0, y: 0.95, z: -2.92 },
+  front_right: { x: 1.12, y: 0.92, z: -2.85 },
+  side_left: { x: -1.26, y: 1.18, z: -1.65 },
+  side_right: { x: 1.26, y: 1.18, z: -1.65 },
+  rear: { x: 0.0, y: 1.25, z: 5.85 },
+};
+
+/**
+ * Applies a localized, intensity-scaled collision to the truck, updating both:
+ * 1) Temporary post-impact visual feedbacks (flickering lights, directional shockwave, 3D sparks, HUD voltage sag)
+ * 2) Permanent per-haul structural damage (zone dents, crumpled metal, headlight housing damage, radiator/engine damage,
+ *    and location-matched windshield spiderweb cracks that escalate with the N-th collision).
+ */
+export function applyTruckCollision(
+  state: TruckPhysicsState,
+  zone: DamageZoneId,
+  rawSeverity: number,
+  customLocalPos?: { x: number; y: number; z: number }
+): void {
+  const intensity = Math.max(0.12, Math.min(1.0, rawSeverity));
+
+  // Always refresh immediate spark & trauma feedback on contact
+  state.lastImpactLocalPos = customLocalPos
+    ? { ...customLocalPos }
+    : { ...ZONE_LOCAL_IMPACT_POS[zone] };
+  state.sparkBurstTimerS = Math.max(state.sparkBurstTimerS, 0.45 + intensity * 0.45);
+  state.cameraTrauma = Math.min(1.0, state.cameraTrauma + 0.28 + intensity * 0.52);
+  state.lastImpactSeverity = intensity;
+  state.lastCollisionZone = zone;
+  state.lastCollisionIntensity = intensity;
+
+  // Guard discrete N-th collision increments with a short cooldown so a continuous barrier scrape
+  // counts as a distinct impact every ~0.38s rather than 60 times per second.
+  if (state.collisionCooldownS > 0) {
+    // Still accumulate subtle scrape denting during continuous contact
+    state.zoneDamage[zone] = Math.min(1.0, state.zoneDamage[zone] + intensity * 0.035);
+    return;
+  }
+
+  state.collisionCount += 1;
+  state.collisionTrigger += 1;
+  state.collisionCooldownS = 0.38;
+
+  const nth = state.collisionCount;
+  // N-th collision multiplier: repeat collisions compound structural fatigue & electrical faults
+  const nthEscalation = 1 + Math.min(2.2, (nth - 1) * 0.28);
+
+  // 1. Temporary Visual Feedbacks (scaled by intensity and N-th collision)
+  state.hitstopTimerS = Math.min(0.065, 0.02 + intensity * 0.04);
+  state.impactFlashTimerS = Math.min(0.95, 0.38 + intensity * 0.48);
+  state.lightFlickerTimerS = Math.min(
+    7.5,
+    Math.max(state.lightFlickerTimerS, (1.6 + intensity * 2.8) * Math.min(1.8, nthEscalation))
+  );
+  state.hudGlitchTimerS = Math.min(1.6, (0.35 + intensity * 0.65) * Math.min(1.6, nthEscalation));
+
+  // Turn on headlights automatically on first frontal/side impact if off so the player immediately sees
+  // the damaged headlamp beam flickering & sputtering!
+  if (!state.headlightsOn && (intensity > 0.22 || nth >= 1)) {
+    state.headlightsOn = true;
+  }
+
+  // 2. Permanent Per-Haul Localized Body Dent & Deformation (`zoneDamage[zone]`)
+  const dentDelta = intensity * (0.22 + Math.min(0.32, (nth - 1) * 0.055));
+  state.zoneDamage[zone] = Math.min(1.0, state.zoneDamage[zone] + dentDelta);
+
+  // Neighboring zone bleed for heavy collisions (intensity > 0.55)
+  if (intensity > 0.55) {
+    const bleed = (intensity - 0.55) * 0.35;
+    if (zone === 'front_center') {
+      state.zoneDamage.front_left = Math.min(1.0, state.zoneDamage.front_left + bleed);
+      state.zoneDamage.front_right = Math.min(1.0, state.zoneDamage.front_right + bleed);
+    } else if (zone === 'front_left') {
+      state.zoneDamage.front_center = Math.min(1.0, state.zoneDamage.front_center + bleed);
+      state.zoneDamage.side_left = Math.min(1.0, state.zoneDamage.side_left + bleed * 0.7);
+    } else if (zone === 'front_right') {
+      state.zoneDamage.front_center = Math.min(1.0, state.zoneDamage.front_center + bleed);
+      state.zoneDamage.side_right = Math.min(1.0, state.zoneDamage.side_right + bleed * 0.7);
+    }
+  }
+
+  // 3. Permanent Per-Haul Headlight, 3D Wing Mirror & Engine / Radiator Damage by Location
+  if (zone === 'front_left' || zone === 'side_left') {
+    const mult = zone === 'front_left' ? 0.36 : 0.18;
+    state.headlightLeftDamage = Math.min(
+      1.0,
+      state.headlightLeftDamage + intensity * mult * nthEscalation
+    );
+    const mirrorMult = zone === 'side_left' ? 0.48 : 0.34;
+    state.mirrorLeftDamage = Math.min(
+      1.0,
+      state.mirrorLeftDamage + intensity * mirrorMult * nthEscalation
+    );
+  }
+  if (zone === 'front_right' || zone === 'side_right') {
+    const mult = zone === 'front_right' ? 0.36 : 0.18;
+    state.headlightRightDamage = Math.min(
+      1.0,
+      state.headlightRightDamage + intensity * mult * nthEscalation
+    );
+    const mirrorMult = zone === 'side_right' ? 0.48 : 0.34;
+    state.mirrorRightDamage = Math.min(
+      1.0,
+      state.mirrorRightDamage + intensity * mirrorMult * nthEscalation
+    );
+  }
+  if (zone === 'front_center') {
+    state.headlightLeftDamage = Math.min(
+      1.0,
+      state.headlightLeftDamage + intensity * 0.22 * nthEscalation
+    );
+    state.headlightRightDamage = Math.min(
+      1.0,
+      state.headlightRightDamage + intensity * 0.22 * nthEscalation
+    );
+    if (intensity > 0.52) {
+      state.mirrorLeftDamage = Math.min(1.0, state.mirrorLeftDamage + (intensity - 0.5) * 0.28);
+      state.mirrorRightDamage = Math.min(1.0, state.mirrorRightDamage + (intensity - 0.5) * 0.28);
+    }
+  }
+
+  if (zone === 'front_center' || zone === 'front_left' || zone === 'front_right') {
+    const engMult = zone === 'front_center' ? 0.32 : 0.2;
+    state.engineDamage = Math.min(
+      1.0,
+      state.engineDamage + intensity * engMult * Math.min(1.5, nthEscalation)
+    );
+  }
+
+  // 3B. Rigid-Body Collision Impulse Physics: Angular Yaw Torque, Lateral Shove, Cabin Jolt & Trailer Whip
+  if (zone === 'front_left') {
+    // Left-front corner impact kicks nose to the right (+heading) and rolls cab right
+    state.impactYawImpulseRadS += (0.28 + intensity * 0.62) * Math.min(1.5, nthEscalation);
+    state.impactLateralVelMs += 1.2 + intensity * 3.4;
+    state.cabinPitchVel -= 0.55 + intensity * 1.15;
+    state.cabinRollVel += 0.65 + intensity * 1.25;
+    state.speedMs *= Math.max(0.45, 1 - intensity * 0.32);
+  } else if (zone === 'front_right') {
+    // Right-front corner impact kicks nose to the left (-heading) and rolls cab left
+    state.impactYawImpulseRadS -= (0.28 + intensity * 0.62) * Math.min(1.5, nthEscalation);
+    state.impactLateralVelMs -= 1.2 + intensity * 3.4;
+    state.cabinPitchVel -= 0.55 + intensity * 1.15;
+    state.cabinRollVel -= 0.65 + intensity * 1.25;
+    state.speedMs *= Math.max(0.45, 1 - intensity * 0.32);
+  } else if (zone === 'front_center') {
+    // Direct frontal impact induces heavy nose-dive pitch jolt and longitudinal energy loss
+    state.cabinPitchVel -= 0.78 + intensity * 1.45;
+    state.cabinRollVel += (nth % 2 === 0 ? 1 : -1) * (0.25 + intensity * 0.45);
+    state.speedMs *= Math.max(0.35, 1 - intensity * 0.42);
+  } else if (zone === 'side_left') {
+    // Left side-swipe shoves truck rightward (+lateral) and rolls cab violently right
+    state.impactLateralVelMs += 1.8 + intensity * 4.2;
+    state.impactYawImpulseRadS += 0.18 + intensity * 0.42;
+    state.cabinRollVel += 0.85 + intensity * 1.55;
+  } else if (zone === 'side_right') {
+    // Right side-swipe shoves truck leftward (-lateral) and rolls cab violently left
+    state.impactLateralVelMs -= 1.8 + intensity * 4.2;
+    state.impactYawImpulseRadS -= 0.18 + intensity * 0.42;
+    state.cabinRollVel -= 0.85 + intensity * 1.55;
+  } else if (zone === 'rear') {
+    // Rear-end impact surges truck forward, pitches cab nose-up, and whips the trailer
+    state.speedMs = Math.min(30.5, state.speedMs + 1.5 + intensity * 3.8);
+    state.cabinPitchVel += 0.68 + intensity * 1.25;
+    state.trailerHeading += (nth % 2 === 0 ? 1 : -1) * (0.08 + intensity * 0.18);
+  }
+
+  // Wheel alignment pull from asymmetrical front suspension damage
+  state.alignmentPull = Math.max(
+    -0.8,
+    Math.min(0.8, (state.zoneDamage.front_left - state.zoneDamage.front_right) * 0.45)
+  );
+
+  // Cargo integrity loss scaled by intensity
+  const cargoLoss = Math.min(14, (1.4 + intensity * 7.5) * Math.min(1.4, nthEscalation));
+  state.cargoIntegrityPct = Math.max(
+    0,
+    Math.round((state.cargoIntegrityPct - cargoLoss) * 10) / 10
+  );
+
+  // 4. Permanent Per-Haul 3D Windshield Glass Spiderweb Cracks
+  // Located on the actual 3D windshield mesh according to impact zone (front_left -> left pane,
+  // front_center -> center pane, front_right -> RHD driver pane, side -> outer corner edge)
+  const isFrontal =
+    zone === 'front_left' || zone === 'front_center' || zone === 'front_right';
+  if ((isFrontal && intensity >= 0.18) || intensity >= 0.38 || nth >= 2) {
+    const seed = nth * 137 + Math.round(intensity * 100);
+    const pseudoRand = (s: number) => {
+      const v = Math.sin(s * 12.9898 + 78.233) * 43758.5453;
+      return v - Math.floor(v);
+    };
+
+    // Map impact zone to UV coordinates (0..1) on the 3D truck windshield mesh:
+    // Note: in RHD cockpit view looking forward (-Z), X < 0 is Left (co-driver), X > 0 is Right (driver)
+    let baseNormX = 0.5;
+    let baseNormY = 0.48;
+    if (zone === 'front_left' || zone === 'side_left') {
+      baseNormX = 0.16 + pseudoRand(seed + 1) * 0.18;
+      baseNormY = 0.32 + pseudoRand(seed + 2) * 0.36;
+    } else if (zone === 'front_right' || zone === 'side_right') {
+      baseNormX = 0.66 + pseudoRand(seed + 3) * 0.18;
+      baseNormY = 0.32 + pseudoRand(seed + 4) * 0.36;
+    } else if (zone === 'front_center') {
+      baseNormX = 0.41 + pseudoRand(seed + 5) * 0.18;
+      baseNormY = 0.28 + pseudoRand(seed + 6) * 0.36;
+    } else {
+      // Rear impact: corner stress fracture near A-pillar edge of 3D windshield
+      baseNormX = pseudoRand(seed + 7) > 0.5 ? 0.86 : 0.14;
+      baseNormY = 0.35 + pseudoRand(seed + 8) * 0.3;
+    }
+
+    const crackSeverity = Math.min(1.0, intensity * (0.65 + Math.min(0.6, nth * 0.12)));
+
+    if (state.windshieldCracks.length < 10) {
+      state.windshieldCracks.push({
+        id: nth,
+        normX: Math.max(0.08, Math.min(0.92, baseNormX)),
+        normY: Math.max(0.16, Math.min(0.84, baseNormY)),
+        intensity: crackSeverity,
+        nthCollision: nth,
+        zone,
+        seed,
+      });
+    } else {
+      const targetIdx = (nth - 1) % state.windshieldCracks.length;
+      const existing = state.windshieldCracks[targetIdx];
+      existing.intensity = Math.min(1.0, existing.intensity + crackSeverity * 0.35);
+      existing.nthCollision = nth;
+    }
+  }
+}
+
+/**
  * Creates the initial grounded truck and articulated trailer state at the start of the active corridor.
  */
 export function createInitialTruckState(
@@ -310,6 +595,41 @@ export function createInitialTruckState(
     hitstopTimerS: 0,
     cameraTrauma: 0,
     lastImpactSeverity: 0,
+    collisionCount: 0,
+    collisionTrigger: 0,
+    collisionCooldownS: 0,
+    lastCollisionZone: 'front_center',
+    lastCollisionIntensity: 0,
+    lastImpactLocalPos: { x: 0, y: 0.95, z: -2.9 },
+
+    impactFlashTimerS: 0,
+    lightFlickerTimerS: 0,
+    sparkBurstTimerS: 0,
+    hudGlitchTimerS: 0,
+    lightFlickerFactor: 1,
+
+    impactYawImpulseRadS: 0,
+    impactLateralVelMs: 0,
+    cabinPitchOffset: 0,
+    cabinRollOffset: 0,
+    cabinPitchVel: 0,
+    cabinRollVel: 0,
+
+    zoneDamage: {
+      front_left: 0,
+      front_center: 0,
+      front_right: 0,
+      side_left: 0,
+      side_right: 0,
+      rear: 0,
+    },
+    headlightLeftDamage: 0,
+    headlightRightDamage: 0,
+    mirrorLeftDamage: 0,
+    mirrorRightDamage: 0,
+    engineDamage: 0,
+    alignmentPull: 0,
+    windshieldCracks: [],
   };
 }
 
@@ -335,18 +655,43 @@ export function stepTruckPhysics(
   const totalMassKg = truckSpec.grossWeightTonnes * 1000;
   const wheelbaseM = truckSpec.wheelbaseM;
 
-  // Decay camera trauma & hitstop in real time
+  // Decay temporary post-collision timers in real time
   state.cameraTrauma = Math.max(0, state.cameraTrauma - dt * 1.45);
+  state.collisionCooldownS = Math.max(0, state.collisionCooldownS - dt);
+  state.impactFlashTimerS = Math.max(0, state.impactFlashTimerS - dt);
+  state.lightFlickerTimerS = Math.max(0, state.lightFlickerTimerS - dt);
+  state.sparkBurstTimerS = Math.max(0, state.sparkBurstTimerS - dt);
+  state.hudGlitchTimerS = Math.max(0, state.hudGlitchTimerS - dt);
+
+  // Compute instantaneous electrical light flicker factor (temporary post-impact sputter + permanent filament wear)
+  const maxHeadlightDmg = Math.max(state.headlightLeftDamage, state.headlightRightDamage);
+  if (state.lightFlickerTimerS > 0) {
+    // High-frequency erratic relay chatter immediately after collision
+    const wave =
+      Math.sin(elapsedTimeS * 62) *
+      Math.cos(elapsedTimeS * 97 + state.collisionCount * 1.7) *
+      Math.sin(elapsedTimeS * 29);
+    const flickerUrgency = Math.min(1, state.lightFlickerTimerS / 2.2);
+    state.lightFlickerFactor = wave < -0.15 * flickerUrgency ? 0.08 : wave < 0.2 ? 0.45 : 1.0;
+  } else if (maxHeadlightDmg > 0.38) {
+    // Permanent intermittent filament drop-out on heavily damaged headlights for the rest of the haul
+    const slowWave = Math.sin(elapsedTimeS * 19 + state.collisionCount) * Math.cos(elapsedTimeS * 43);
+    state.lightFlickerFactor = slowWave < -0.68 ? 0.22 : 1.0 - maxHeadlightDmg * 0.25;
+  } else {
+    state.lightFlickerFactor = 1.0;
+  }
+
   if (state.hitstopTimerS > 0) {
     state.hitstopTimerS = Math.max(0, state.hitstopTimerS - dt);
     return state;
   }
 
-  // 1. Speed-Sensitive Heavy Steering Dynamics
+  // 1. Speed-Sensitive Heavy Steering Dynamics (with subtle alignment pull when front suspension is bent)
   const absSpeedKmh = Math.abs(state.speedMs) * 3.6;
   const speedSteerFactor = 1 / (1 + Math.pow(absSpeedKmh / 42, 1.45));
   const maxAllowedSteer = MAX_STEER_ANGLE_RAD * Math.max(0.22, speedSteerFactor);
-  const targetSteerRad = -input.steer * maxAllowedSteer;
+  const alignmentBias = state.alignmentPull * 0.045 * Math.min(1, absSpeedKmh / 45);
+  const targetSteerRad = -input.steer * maxAllowedSteer + alignmentBias;
   const steerRate = input.steer !== 0 ? 2.4 : 3.2;
   state.steerAngleRad += (targetSteerRad - state.steerAngleRad) * (1 - Math.exp(-steerRate * dt));
 
@@ -433,10 +778,13 @@ export function stepTruckPhysics(
       ? Math.abs(wheelAngularVel * overallGearRatio * (60 / (Math.PI * 2)))
       : IDLE_RPM;
 
-  const clutchLaunchRpm = IDLE_RPM + effectiveThrottle * 720;
+  // Slight idle roughness if engine has sustained heavy frontal damage
+  const engineRoughJitter =
+    state.engineDamage > 0.35 ? Math.sin(elapsedTimeS * 38) * state.engineDamage * 36 : 0;
+  const clutchLaunchRpm = IDLE_RPM + effectiveThrottle * 720 + engineRoughJitter;
   const targetRpm =
     currentGear.ratio === 0 || state.shiftCooldownS > 0
-      ? IDLE_RPM + effectiveThrottle * 1150
+      ? IDLE_RPM + effectiveThrottle * 1150 + engineRoughJitter
       : Math.max(clutchLaunchRpm, Math.min(REDLINE_RPM, coupledEngineRpm));
 
   state.rpm += (targetRpm - state.rpm) * (1 - Math.exp(-14 * dt));
@@ -459,7 +807,9 @@ export function stepTruckPhysics(
 
   let driveForceN = 0;
   if (currentGear.ratio !== 0 && state.shiftCooldownS <= 0) {
-    const engineTorque = computeEngineTorqueNm(state.rpm, truckSpec.peakTorqueNm);
+    const engineHealthEfficiency = 1 - state.engineDamage * 0.18;
+    const engineTorque =
+      computeEngineTorqueNm(state.rpm, truckSpec.peakTorqueNm) * engineHealthEfficiency;
     const launchAssist = Math.abs(state.speedMs) < 5.0 ? 1.45 : 1.0;
     const revLimiter = state.rpm >= REDLINE_RPM - 40 ? Math.max(0, (REDLINE_RPM - state.rpm) / 40) : 1;
     const wheelTorque =
@@ -540,16 +890,23 @@ export function stepTruckPhysics(
   state.speedKmh = Math.abs(state.speedMs) * 3.6;
   state.accelerationMs2 = (state.speedMs - prevSpeedMs) / dt;
 
-  // 5. Kinematic Bicycle + Lateral Slip Model for Heavy Tractor
+  // 5. Kinematic Bicycle + Lateral Slip & Collision Impulse Model for Heavy Tractor
   const curvatureFromSteer = Math.tan(state.steerAngleRad) / wheelbaseM;
   const trailerDamping = 1 / (1 + Math.abs(state.articulationAngleRad) * 0.35);
-  state.yawRateRadS = state.speedMs * curvatureFromSteer * trailerDamping;
+  state.impactYawImpulseRadS *= Math.exp(-5.5 * dt);
+  state.impactLateralVelMs *= Math.exp(-6.2 * dt);
+
+  state.yawRateRadS =
+    state.speedMs * curvatureFromSteer * trailerDamping + state.impactYawImpulseRadS;
   state.heading = normalizeAngleRad(state.heading + state.yawRateRadS * dt);
 
   const forwardX = Math.sin(state.heading);
   const forwardZ = -Math.cos(state.heading);
-  state.x += forwardX * state.speedMs * dt;
-  state.z += forwardZ * state.speedMs * dt;
+  const rightX = Math.cos(state.heading);
+  const rightZ = Math.sin(state.heading);
+  state.x += (forwardX * state.speedMs + rightX * state.impactLateralVelMs) * dt;
+  state.z += (forwardZ * state.speedMs + rightZ * state.impactLateralVelMs) * dt;
+  state.lateralVelocityMs = state.impactLateralVelMs;
 
   // 6. Highway Projection, Guardrail / Median Barrier Constraints & Grounding
   const proj = projectWorldToSpline(state.x, state.z, state.distanceAlongHighwayM);
@@ -562,8 +919,6 @@ export function stepTruckPhysics(
   state.totalDistanceDrivenM += Math.abs(state.speedMs) * dt;
 
   // Rigid outer highway guardrail & retaining wall constraint
-  // Guardrail sits at ±12.2m; truck half-width is ~1.25m, so rigid center limit is ±10.85m
-  // (Widens to -22.5m on the left along the Dhaba parking apron at s=2385..2515, and ±14.8m at Toll Plaza)
   const isDhabaLayby = proj.s > 2385 && proj.s < 2515 && proj.lateralOffset < 0;
   const outerGuardrailLimit = proj.sample.isTollPlaza
     ? 14.8
@@ -571,47 +926,86 @@ export function stepTruckPhysics(
       ? 22.5
       : 10.85;
   if (Math.abs(proj.lateralOffset) > outerGuardrailLimit) {
+    const isLeftBarrier = proj.lateralOffset < 0;
     const clampedLat = Math.sign(proj.lateralOffset) * outerGuardrailLimit;
     const corrected = splineToWorld(proj.s, clampedLat, 0);
     state.x = corrected.x;
     state.z = corrected.z;
     state.lateralOffsetM = clampedLat;
     const headingError = normalizeAngleRad(proj.sample.heading - state.heading);
+    const approachAngle = Math.abs(headingError);
     state.heading = normalizeAngleRad(state.heading + headingError * 0.55);
-    if (state.speedKmh > 25) {
+    if (state.speedKmh > 14) {
+      const impactZone: DamageZoneId = isLeftBarrier
+        ? approachAngle > 0.14
+          ? 'front_left'
+          : 'side_left'
+        : approachAngle > 0.14
+          ? 'front_right'
+          : 'side_right';
+      const rawSev = Math.min(1.0, (state.speedKmh / 85) * (0.45 + approachAngle * 1.4));
       state.speedMs *= 0.88;
-      state.cameraTrauma = Math.min(1, state.cameraTrauma + 0.35);
-      state.cargoIntegrityPct = Math.max(0, state.cargoIntegrityPct - 1.5);
+      applyTruckCollision(state, impactZone, rawSev);
     }
   }
 
+  // Rigid Central Concrete Jersey Median Barrier Constraint
   if (!proj.sample.isTollPlaza && Math.abs(proj.lateralOffset) < 1.85) {
-    const pushSide = proj.lateralOffset <= 0 ? -1.9 : 1.9;
+    const inLeftCarriageway = proj.lateralOffset <= 0;
+    const pushSide = inLeftCarriageway ? -1.9 : 1.9;
     const corrected = splineToWorld(proj.s, pushSide, 0);
     state.x = corrected.x;
     state.z = corrected.z;
     state.lateralOffsetM = pushSide;
     const headingError = normalizeAngleRad(proj.sample.heading - state.heading);
+    const approachAngle = Math.abs(headingError);
     state.heading = normalizeAngleRad(state.heading + headingError * 0.55);
-    if (state.speedKmh > 20) {
+    if (state.speedKmh > 12) {
+      // In left-hand traffic (lateralOffset < 0), the median barrier is on the RIGHT side of the truck!
+      const impactZone: DamageZoneId = inLeftCarriageway
+        ? approachAngle > 0.12
+          ? 'front_right'
+          : 'side_right'
+        : approachAngle > 0.12
+          ? 'front_left'
+          : 'side_left';
+      const rawSev = Math.min(1.0, (state.speedKmh / 75) * (0.55 + approachAngle * 1.5));
       state.speedMs *= 0.82;
-      state.cameraTrauma = Math.min(1, state.cameraTrauma + 0.45);
-      state.cargoIntegrityPct = Math.max(0, state.cargoIntegrityPct - 2.5);
-      state.lastImpactSeverity = 0.5;
+      applyTruckCollision(state, impactZone, rawSev);
     }
   }
 
-  // 7. 6-Wheel Suspension & Cabin Pitch/Roll Dynamics (R4 & R5)
+  // 7. 6-Wheel Suspension & Underdamped Pneumatic Cabin Pitch/Roll Jolt Dynamics (R4 & R5)
   state.y = proj.groundY;
 
+  // Step 2nd-order spring-damper ODE for collision & bump cab jolt
+  const springK = 44.0;
+  const damperC = 7.8;
+  const pitchSpringAccel = -springK * state.cabinPitchOffset - damperC * state.cabinPitchVel;
+  const rollSpringAccel = -springK * state.cabinRollOffset - damperC * state.cabinRollVel;
+  state.cabinPitchVel += pitchSpringAccel * dt;
+  state.cabinRollVel += rollSpringAccel * dt;
+  state.cabinPitchOffset = Math.max(
+    -0.18,
+    Math.min(0.18, state.cabinPitchOffset + state.cabinPitchVel * dt)
+  );
+  state.cabinRollOffset = Math.max(
+    -0.22,
+    Math.min(0.22, state.cabinRollOffset + state.cabinRollVel * dt)
+  );
+
   const targetPitch =
-    -proj.grade + Math.max(-0.075, Math.min(0.06, state.accelerationMs2 * 0.012));
+    -proj.grade +
+    Math.max(-0.075, Math.min(0.06, state.accelerationMs2 * 0.012)) +
+    state.cabinPitchOffset;
   const lateralAccelMs2 = state.speedMs * state.yawRateRadS;
   const targetRoll =
-    proj.bankAngle + Math.max(-0.11, Math.min(0.11, -lateralAccelMs2 * 0.022));
+    proj.bankAngle +
+    Math.max(-0.11, Math.min(0.11, -lateralAccelMs2 * 0.022)) +
+    state.cabinRollOffset;
 
-  state.pitch += (targetPitch - state.pitch) * (1 - Math.exp(-10 * dt));
-  state.roll += (targetRoll - state.roll) * (1 - Math.exp(-10 * dt));
+  state.pitch += (targetPitch - state.pitch) * (1 - Math.exp(-12 * dt));
+  state.roll += (targetRoll - state.roll) * (1 - Math.exp(-12 * dt));
 
   state.wheelRotationRad =
     (state.wheelRotationRad + (state.speedMs / WHEEL_RADIUS_M) * dt) % (Math.PI * 2000);
