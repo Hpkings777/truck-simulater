@@ -1,6 +1,6 @@
 import {
+  getActiveMapSpec,
   HIGHWAY_LENGTH_M,
-  HIGHWAY_WAYPOINTS,
   LANE_CENTERS,
   projectWorldToSpline,
   RoadSurfaceType,
@@ -30,6 +30,7 @@ export interface WheelTelemetry {
 }
 
 export interface TruckPhysicsState {
+  truckModelId: TruckModelId;
   // Spatial pose of Tractor Unit
   x: number;
   y: number;
@@ -126,11 +127,61 @@ export const HEAVY_TRUCK_GEARS: GearSpec[] = [
   { label: '6H', ratio: 0.78 },
 ];
 
-// Physical Constants for 32-Tonne Articulated Tractor-Trailer
-const TRACTOR_MASS_KG = 7800;
-const TRAILER_MASS_KG = 24200;
-const TOTAL_MASS_KG = TRACTOR_MASS_KG + TRAILER_MASS_KG; // 32,000 kg (32 tonnes)
-const WHEELBASE_M = 5.2; // Tractor front-to-rear bogie center
+export type TruckModelId = 'tata_prima_4928' | 'ashok_leyland_3520' | 'bharatbenz_4228r';
+
+export interface TruckModelSpec {
+  id: TruckModelId;
+  name: string;
+  shortName: string;
+  category: string;
+  engineSpec: string;
+  grossWeightTonnes: number;
+  peakTorqueNm: number;
+  wheelbaseM: number;
+  hasArticulatedTrailer: boolean;
+  glbModelPath: string;
+}
+
+export const TRUCK_MODEL_SPECS: Record<TruckModelId, TruckModelSpec> = {
+  tata_prima_4928: {
+    id: 'tata_prima_4928',
+    name: 'Tata Prima 4928.S (40ft Container Rig)',
+    shortName: 'Tata Prima 4928.S',
+    category: '6×4 Articulated Container Tractor-Trailer',
+    engineSpec: '6.7L Cummins ISBe 280 HP · 12-Spd',
+    grossWeightTonnes: 32,
+    peakTorqueNm: 2450,
+    wheelbaseM: 5.2,
+    hasArticulatedTrailer: true,
+    glbModelPath: '/models/tata_prima_4928.glb',
+  },
+  ashok_leyland_3520: {
+    id: 'ashok_leyland_3520',
+    name: 'Ashok Leyland 3520 "Goods Carrier"',
+    shortName: 'Ashok Leyland 3520',
+    category: 'Traditional Indian Wooden-Cab 10-Wheeler Lorry',
+    engineSpec: 'H-Series 6-Cyl CRS 200 HP · High-Torque Ghat Spec',
+    grossWeightTonnes: 25,
+    peakTorqueNm: 2150,
+    wheelbaseM: 5.6,
+    hasArticulatedTrailer: false,
+    glbModelPath: '/models/ashok_leyland_3520.glb',
+  },
+  bharatbenz_4228r: {
+    id: 'bharatbenz_4228r',
+    name: 'BharatBenz 4228R Petroleum Tanker',
+    shortName: 'BharatBenz 4228R Tanker',
+    category: 'Tri-Axle Stainless Chromium Fuel Tanker Rig',
+    engineSpec: 'OM 926 7.2L 280 HP · Hazmat Retarder Spec',
+    grossWeightTonnes: 35,
+    peakTorqueNm: 2650,
+    wheelbaseM: 5.1,
+    hasArticulatedTrailer: true,
+    glbModelPath: '/models/bharatbenz_4228r.glb',
+  },
+};
+
+// Physical Constants for Heavy Commercial Tractor-Trailer
 const TRAILER_KINGPIN_TO_AXLE_M = 8.4; // 40ft container trailer effective wheelbase
 const WHEEL_RADIUS_M = 0.54; // 295/80 R22.5 heavy truck tire
 const FINAL_DRIVE_RATIO = 5.12; // Hub-reduction heavy tandem axle ratio
@@ -138,7 +189,7 @@ const DRIVETRAIN_EFFICIENCY = 0.91;
 
 const IDLE_RPM = 650;
 const REDLINE_RPM = 2500;
-const PEAK_TORQUE_NM = 2450; // Heavy-duty 6-cylinder turbodiesel torque
+const PEAK_TORQUE_NM = 2450; // Default heavy-duty 6-cylinder turbodiesel torque
 
 const MAX_STEER_ANGLE_RAD = 0.54; // ~31 degrees at low speed
 const GRAVITY = 9.81;
@@ -151,23 +202,26 @@ const ROLLING_RESISTANCE_CR = 0.0062;
  * Evaluates heavy diesel engine torque (Nm) at a given RPM.
  * Broad flat torque plateau between 1,050 and 1,750 RPM, tapering gracefully to redline.
  */
-export function computeEngineTorqueNm(rpm: number): number {
+export function computeEngineTorqueNm(rpm: number, peakTorque = PEAK_TORQUE_NM): number {
   const clamped = Math.max(IDLE_RPM, Math.min(REDLINE_RPM + 150, rpm));
   if (clamped < 1050) {
     const t = (clamped - IDLE_RPM) / (1050 - IDLE_RPM);
-    return PEAK_TORQUE_NM * (0.68 + 0.32 * t);
+    return peakTorque * (0.68 + 0.32 * t);
   }
   if (clamped <= 1750) {
-    return PEAK_TORQUE_NM;
+    return peakTorque;
   }
   const falloff = (clamped - 1750) / (REDLINE_RPM - 1750);
-  return PEAK_TORQUE_NM * Math.max(0.2, 1 - 0.68 * falloff * falloff);
+  return peakTorque * Math.max(0.2, 1 - 0.68 * falloff * falloff);
 }
 
 /**
- * Creates the initial grounded truck and articulated trailer state at the start of the NH-44 corridor.
+ * Creates the initial grounded truck and articulated trailer state at the start of the active corridor.
  */
-export function createInitialTruckState(startS = 60): TruckPhysicsState {
+export function createInitialTruckState(
+  startS = 60,
+  truckModelId: TruckModelId = 'tata_prima_4928'
+): TruckPhysicsState {
   const startLaneOffset = LANE_CENTERS.FORWARD_OUTER; // Left-hand traffic heavy lane (-7.6m)
   const worldPos = splineToWorld(startS, startLaneOffset, 0);
   const heading = worldPos.sample.heading;
@@ -194,6 +248,7 @@ export function createInitialTruckState(startS = 60): TruckPhysicsState {
   ];
 
   return {
+    truckModelId,
     x: worldPos.x,
     y: worldPos.y,
     z: worldPos.z,
@@ -242,8 +297,8 @@ export function createInitialTruckState(startS = 60): TruckPhysicsState {
     zoneName: worldPos.sample.zoneName,
     landmarkKm: worldPos.sample.landmarkKm,
     speedLimitKmh: worldPos.sample.speedLimitKmh,
-    nextWaypointName: HIGHWAY_WAYPOINTS[1].name,
-    nextWaypointDistanceM: HIGHWAY_WAYPOINTS[1].s - startS,
+    nextWaypointName: getActiveMapSpec().waypoints[1].name,
+    nextWaypointDistanceM: getActiveMapSpec().waypoints[1].s - startS,
     cargoIntegrityPct: 100,
 
     headlightsOn: false,
@@ -276,6 +331,9 @@ export function stepTruckPhysics(
 ): TruckPhysicsState {
   // Clamp delta time to prevent physics tunneling on tab switches
   const dt = Math.max(0.0001, Math.min(rawDt, 0.05));
+  const truckSpec = TRUCK_MODEL_SPECS[state.truckModelId] ?? TRUCK_MODEL_SPECS.tata_prima_4928;
+  const totalMassKg = truckSpec.grossWeightTonnes * 1000;
+  const wheelbaseM = truckSpec.wheelbaseM;
 
   // Decay camera trauma & hitstop in real time
   state.cameraTrauma = Math.max(0, state.cameraTrauma - dt * 1.45);
@@ -369,14 +427,12 @@ export function stepTruckPhysics(
     effectiveThrottle = 0;
   }
 
-  // Compute wheel-coupled RPM when in gear
   const wheelAngularVel = state.speedMs / WHEEL_RADIUS_M;
   const coupledEngineRpm =
     Math.abs(overallGearRatio) > 0.01
       ? Math.abs(wheelAngularVel * overallGearRatio * (60 / (Math.PI * 2)))
       : IDLE_RPM;
 
-  // Fluid clutch coupling at low speeds keeps diesel engine in its torque band under launch throttle
   const clutchLaunchRpm = IDLE_RPM + effectiveThrottle * 720;
   const targetRpm =
     currentGear.ratio === 0 || state.shiftCooldownS > 0
@@ -401,10 +457,9 @@ export function stepTruckPhysics(
         );
   state.turboBoostBar += (targetBoost - state.turboBoostBar) * (1 - Math.exp(-4.5 * dt));
 
-  // Drive Force at the rear tractor bogie wheels
   let driveForceN = 0;
   if (currentGear.ratio !== 0 && state.shiftCooldownS <= 0) {
-    const engineTorque = computeEngineTorqueNm(state.rpm);
+    const engineTorque = computeEngineTorqueNm(state.rpm, truckSpec.peakTorqueNm);
     const launchAssist = Math.abs(state.speedMs) < 5.0 ? 1.45 : 1.0;
     const revLimiter = state.rpm >= REDLINE_RPM - 40 ? Math.max(0, (REDLINE_RPM - state.rpm) / 40) : 1;
     const wheelTorque =
@@ -437,14 +492,14 @@ export function stepTruckPhysics(
     0.5 * AIR_DENSITY * DRAG_COEFF_CD * FRONTAL_AREA_M2 * state.speedMs * Math.abs(state.speedMs);
   const rollingResN =
     (Math.abs(state.speedMs) > 0.05 ? Math.sign(state.speedMs) : 0) *
-    TOTAL_MASS_KG *
+    totalMassKg *
     GRAVITY *
     ROLLING_RESISTANCE_CR *
     surfaceRollingMultiplier;
 
   const roadDirDot = Math.cos(state.heading - projBefore.heading);
   const effectiveGrade = projBefore.grade * roadDirDot;
-  const gradeGravityN = TOTAL_MASS_KG * GRAVITY * Math.sin(Math.atan(effectiveGrade));
+  const gradeGravityN = totalMassKg * GRAVITY * Math.sin(Math.atan(effectiveGrade));
 
   // Pneumatic Air Brakes
   const airEfficiency = Math.min(1, Math.max(0.35, state.airPressurePsi / 100));
@@ -454,7 +509,6 @@ export function stepTruckPhysics(
       ? Math.sign(state.speedMs) * effectiveServiceBrake * maxBrakeForceN
       : 0;
 
-  // Air reservoir PSI dynamics (depressing brake pedal consumes air; releasing allows compressor recharge)
   if (effectiveServiceBrake > 0.15) {
     state.airPressurePsi = Math.max(65, state.airPressurePsi - effectiveServiceBrake * 3.2 * dt);
   } else {
@@ -464,14 +518,12 @@ export function stepTruckPhysics(
     );
   }
 
-  // Total net longitudinal force & acceleration
   const netForceN = driveForceN - aeroDragN - rollingResN - gradeGravityN - brakeForceN;
   const prevSpeedMs = state.speedMs;
-  const rawAccelMs2 = netForceN / TOTAL_MASS_KG;
+  const rawAccelMs2 = netForceN / totalMassKg;
 
   let nextSpeedMs = state.speedMs + rawAccelMs2 * dt;
 
-  // Prevent brake overshoot oscillation around zero speed
   if (
     effectiveThrottle < 0.02 &&
     (effectiveServiceBrake > 0.05 || Math.abs(nextSpeedMs) < 0.08) &&
@@ -484,21 +536,16 @@ export function stepTruckPhysics(
     }
   }
 
-  // Cap top speed to realistic heavy commercial governor (~108 km/h = 30 m/s forward, -6 m/s reverse)
   state.speedMs = Math.max(-6.5, Math.min(30.5, nextSpeedMs));
   state.speedKmh = Math.abs(state.speedMs) * 3.6;
   state.accelerationMs2 = (state.speedMs - prevSpeedMs) / dt;
 
   // 5. Kinematic Bicycle + Lateral Slip Model for Heavy Tractor
-  // Notice: in our world coordinates, heading = 0 is -Z, and +heading turns toward +X (right).
-  // SteerAngleRad > 0 is right turn, < 0 is left turn.
-  const curvatureFromSteer = Math.tan(state.steerAngleRad) / WHEELBASE_M;
-  // Heavy trailer resists instant yaw changes (understeer damping at high speed)
+  const curvatureFromSteer = Math.tan(state.steerAngleRad) / wheelbaseM;
   const trailerDamping = 1 / (1 + Math.abs(state.articulationAngleRad) * 0.35);
   state.yawRateRadS = state.speedMs * curvatureFromSteer * trailerDamping;
   state.heading = normalizeAngleRad(state.heading + state.yawRateRadS * dt);
 
-  // Advance Tractor World Position
   const forwardX = Math.sin(state.heading);
   const forwardZ = -Math.cos(state.heading);
   state.x += forwardX * state.speedMs * dt;
@@ -514,17 +561,23 @@ export function stepTruckPhysics(
   state.speedLimitKmh = proj.sample.speedLimitKmh;
   state.totalDistanceDrivenM += Math.abs(state.speedMs) * dt;
 
-  // Outer highway boundary guardrail constraint (±13.2m normal, ±16.8m at toll plaza)
-  const outerGuardrailLimit = proj.sample.isTollPlaza ? 16.5 : 12.8;
+  // Rigid outer highway guardrail & retaining wall constraint
+  // Guardrail sits at ±12.2m; truck half-width is ~1.25m, so rigid center limit is ±10.85m
+  // (Widens to -22.5m on the left along the Dhaba parking apron at s=2385..2515, and ±14.8m at Toll Plaza)
+  const isDhabaLayby = proj.s > 2385 && proj.s < 2515 && proj.lateralOffset < 0;
+  const outerGuardrailLimit = proj.sample.isTollPlaza
+    ? 14.8
+    : isDhabaLayby
+      ? 22.5
+      : 10.85;
   if (Math.abs(proj.lateralOffset) > outerGuardrailLimit) {
     const clampedLat = Math.sign(proj.lateralOffset) * outerGuardrailLimit;
     const corrected = splineToWorld(proj.s, clampedLat, 0);
     state.x = corrected.x;
     state.z = corrected.z;
     state.lateralOffsetM = clampedLat;
-    // Gently align heading back toward highway tangent & scrub speed
     const headingError = normalizeAngleRad(proj.sample.heading - state.heading);
-    state.heading = normalizeAngleRad(state.heading + headingError * 0.35);
+    state.heading = normalizeAngleRad(state.heading + headingError * 0.55);
     if (state.speedKmh > 25) {
       state.speedMs *= 0.88;
       state.cameraTrauma = Math.min(1, state.cameraTrauma + 0.35);
@@ -532,15 +585,14 @@ export function stepTruckPhysics(
     }
   }
 
-  // Central Jersey Barrier collision response (barrier spans -1.45m..+1.45m outside toll plaza)
-  if (!proj.sample.isTollPlaza && Math.abs(proj.lateralOffset) < 1.35) {
-    const pushSide = proj.lateralOffset <= 0 ? -1.42 : 1.42;
+  if (!proj.sample.isTollPlaza && Math.abs(proj.lateralOffset) < 1.85) {
+    const pushSide = proj.lateralOffset <= 0 ? -1.9 : 1.9;
     const corrected = splineToWorld(proj.s, pushSide, 0);
     state.x = corrected.x;
     state.z = corrected.z;
     state.lateralOffsetM = pushSide;
     const headingError = normalizeAngleRad(proj.sample.heading - state.heading);
-    state.heading = normalizeAngleRad(state.heading + headingError * 0.45);
+    state.heading = normalizeAngleRad(state.heading + headingError * 0.55);
     if (state.speedKmh > 20) {
       state.speedMs *= 0.82;
       state.cameraTrauma = Math.min(1, state.cameraTrauma + 0.45);
@@ -549,26 +601,26 @@ export function stepTruckPhysics(
     }
   }
 
-  // 7. 6-Wheel Suspension & Cabin Pitch/Roll Dynamics
-  state.y += (proj.groundY - state.y) * (1 - Math.exp(-22 * dt));
+  // 7. 6-Wheel Suspension & Cabin Pitch/Roll Dynamics (R4 & R5)
+  state.y = proj.groundY;
 
-  // Nose dives on braking (accelerationMs2 < 0 -> negative pitch), squats on acceleration
   const targetPitch =
-    -proj.grade + Math.max(-0.055, Math.min(0.045, state.accelerationMs2 * 0.0085));
-  // Centrifugal roll on cornering + road banking
+    -proj.grade + Math.max(-0.075, Math.min(0.06, state.accelerationMs2 * 0.012));
   const lateralAccelMs2 = state.speedMs * state.yawRateRadS;
   const targetRoll =
-    proj.bankAngle + Math.max(-0.08, Math.min(0.08, -lateralAccelMs2 * 0.014));
+    proj.bankAngle + Math.max(-0.11, Math.min(0.11, -lateralAccelMs2 * 0.022));
 
   state.pitch += (targetPitch - state.pitch) * (1 - Math.exp(-10 * dt));
   state.roll += (targetRoll - state.roll) * (1 - Math.exp(-10 * dt));
 
-  // Update individual wheel spin and suspension compression
   state.wheelRotationRad =
     (state.wheelRotationRad + (state.speedMs / WHEEL_RADIUS_M) * dt) % (Math.PI * 2000);
   const bumpOsc =
-    (state.currentSurface === 'shoulder' ? 0.08 : 0.015) *
-    Math.sin(state.distanceAlongHighwayM * 2.2);
+    (state.currentSurface === 'shoulder'
+      ? 0.055
+      : state.currentSurface === 'offroad'
+      ? 0.08
+      : 0.018) * Math.sin(state.distanceAlongHighwayM * 2.4);
 
   for (let i = 0; i < state.wheels.length; i++) {
     const w = state.wheels[i];
@@ -576,8 +628,8 @@ export function stepTruckPhysics(
     const isLeft = i % 2 === 0;
     w.rotationRad = state.wheelRotationRad;
     w.steerAngleRad = isFront ? state.steerAngleRad : 0;
-    const pitchComp = (isFront ? -1 : 1) * state.pitch * 2.2;
-    const rollComp = (isLeft ? -1 : 1) * state.roll * 2.0;
+    const pitchComp = (isFront ? -1 : 1) * state.pitch * 2.6;
+    const rollComp = (isLeft ? -1 : 1) * state.roll * 2.4;
     w.compression = Math.max(
       0.05,
       Math.min(0.95, 0.4 + pitchComp + rollComp + (isLeft ? bumpOsc : -bumpOsc))
@@ -585,42 +637,60 @@ export function stepTruckPhysics(
     w.contactY = state.y;
   }
 
-  // 8. Fifth-Wheel Articulated Trailer Kinematics
-  // Kingpin world position on the rear of the tractor chassis (1.9m behind tractor origin)
-  const kingpinX = state.x - forwardX * 1.9;
-  const kingpinZ = state.z - forwardZ * 1.9;
+  // 8. Fifth-Wheel Articulated Trailer vs Rigid Lorry Kinematics
+  if (!truckSpec.hasArticulatedTrailer) {
+    state.trailerHeading = state.heading;
+    state.articulationAngleRad = 0;
+    state.jackknifeWarning = false;
+    state.trailerX = state.x;
+    state.trailerY = state.y;
+    state.trailerZ = state.z;
+    state.trailerPitch = state.pitch;
+    state.trailerRoll = state.roll;
+  } else {
+    const kingpinX = state.x - forwardX * 1.9;
+    const kingpinZ = state.z - forwardZ * 1.9;
 
-  // Classic heavy-trailer tractrix / kinematic hitch differential equation:
-  // d(trailerHeading)/dt = (v / L_trailer) * sin(tractorHeading - trailerHeading)
-  const hitchDiff = normalizeAngleRad(state.heading - state.trailerHeading);
-  const trailerYawRate = (state.speedMs / TRAILER_KINGPIN_TO_AXLE_M) * Math.sin(hitchDiff);
-  state.trailerHeading = normalizeAngleRad(state.trailerHeading + trailerYawRate * dt);
+    const hitchDiff = normalizeAngleRad(state.heading - state.trailerHeading);
+    const trailerYawRate = (state.speedMs / TRAILER_KINGPIN_TO_AXLE_M) * Math.sin(hitchDiff);
+    state.trailerHeading = normalizeAngleRad(state.trailerHeading + trailerYawRate * dt);
 
-  // Enforce physical fifth-wheel stop limits (±75 degrees = 1.31 rad) to prevent unrealistic spin
-  let artAngle = normalizeAngleRad(state.heading - state.trailerHeading);
-  const maxArticulationRad = 1.25;
-  if (Math.abs(artAngle) > maxArticulationRad) {
-    artAngle = Math.sign(artAngle) * maxArticulationRad;
-    state.trailerHeading = normalizeAngleRad(state.heading - artAngle);
+    let artAngle = normalizeAngleRad(state.heading - state.trailerHeading);
+    const maxArticulationRad = 1.25;
+    if (Math.abs(artAngle) > maxArticulationRad) {
+      artAngle = Math.sign(artAngle) * maxArticulationRad;
+      state.trailerHeading = normalizeAngleRad(state.heading - artAngle);
+    }
+    state.articulationAngleRad = artAngle;
+    state.jackknifeWarning = Math.abs(artAngle) > 0.78;
+
+    const trailerFwdX = Math.sin(state.trailerHeading);
+    const trailerFwdZ = -Math.cos(state.trailerHeading);
+    const trailerCenterOffset = 5.4;
+    state.trailerX = kingpinX - trailerFwdX * trailerCenterOffset;
+    state.trailerZ = kingpinZ - trailerFwdZ * trailerCenterOffset;
+
+    const trailerProj = projectWorldToSpline(
+      state.trailerX,
+      state.trailerZ,
+      state.distanceAlongHighwayM - 7.3
+    );
+
+    // Rigid guardrail clamping for the trailer so it never swings through outer guardrails or median barrier
+    if (Math.abs(trailerProj.lateralOffset) > outerGuardrailLimit) {
+      const clampedT = Math.sign(trailerProj.lateralOffset) * outerGuardrailLimit;
+      const corrT = splineToWorld(trailerProj.s, clampedT, 0);
+      state.trailerX = corrT.x;
+      state.trailerZ = corrT.z;
+      state.trailerHeading = state.heading;
+      state.articulationAngleRad = 0;
+    }
+
+    state.trailerY = trailerProj.groundY;
+    state.trailerPitch += (-trailerProj.grade - state.trailerPitch) * (1 - Math.exp(-12 * dt));
+    state.trailerRoll +=
+      (trailerProj.bankAngle + state.roll * 0.45 - state.trailerRoll) * (1 - Math.exp(-12 * dt));
   }
-  state.articulationAngleRad = artAngle;
-  state.jackknifeWarning = Math.abs(artAngle) > 0.78; // > ~45 degrees
-
-  const trailerFwdX = Math.sin(state.trailerHeading);
-  const trailerFwdZ = -Math.cos(state.trailerHeading);
-  const trailerCenterOffset = 5.4; // Distance from kingpin to geometric center of 40ft container trailer
-  state.trailerX = kingpinX - trailerFwdX * trailerCenterOffset;
-  state.trailerZ = kingpinZ - trailerFwdZ * trailerCenterOffset;
-
-  const trailerProj = projectWorldToSpline(
-    state.trailerX,
-    state.trailerZ,
-    state.distanceAlongHighwayM - 7.3
-  );
-  state.trailerY += (trailerProj.groundY - state.trailerY) * (1 - Math.exp(-18 * dt));
-  state.trailerPitch += (-trailerProj.grade - state.trailerPitch) * (1 - Math.exp(-10 * dt));
-  state.trailerRoll +=
-    (trailerProj.bankAngle + state.roll * 0.45 - state.trailerRoll) * (1 - Math.exp(-10 * dt));
 
   // 9. Fuel Consumption & Next Waypoint Calculation
   const fuelRateLPerSec =
@@ -633,9 +703,10 @@ export function stepTruckPhysics(
 
   const wrappedS =
     ((state.distanceAlongHighwayM % HIGHWAY_LENGTH_M) + HIGHWAY_LENGTH_M) % HIGHWAY_LENGTH_M;
-  let nextWp = HIGHWAY_WAYPOINTS[0];
+  const activeWaypoints = getActiveMapSpec().waypoints;
+  let nextWp = activeWaypoints[0];
   let distToWp = HIGHWAY_LENGTH_M - wrappedS;
-  for (const wp of HIGHWAY_WAYPOINTS) {
+  for (const wp of activeWaypoints) {
     if (wp.s > wrappedS + 20) {
       nextWp = wp;
       distToWp = wp.s - wrappedS;

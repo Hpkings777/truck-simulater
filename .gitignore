@@ -6,3 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+.playwright-cli/
+.gmp_cache/
+screenshots/
+*.png
+

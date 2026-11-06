@@ -25,8 +25,15 @@ import {
   stepTruckPhysics,
   TransmissionMode,
   TruckControlInput,
+  TruckModelId,
   TruckPhysicsState,
 } from './physics/vehiclePhysics';
+import {
+  MAP_CORRIDORS,
+  MapCorridorId,
+  setActiveMapId,
+  splineToWorld,
+} from './physics/highwaySpline';
 import {
   createInitialTrafficFleet,
   stepTrafficSimulation,
@@ -40,21 +47,8 @@ import {
   syncPlayerRigMeshes,
 } from './world/truckBuilder';
 import { buildHighwayEnvironment, HighwayEnvironmentHandles } from './world/environmentBuilder';
-import { GeospatialStatus, probeGoogle3DTilesAvailability } from './world/geospatialTiles';
+import { GeospatialStatus, getBakedGeospatialStatus } from './world/geospatialTiles';
 import { TruckAudioEngine } from './audio/truckAudio';
-
-const INITIAL_GEOSPATIAL_STATUS: GeospatialStatus = {
-  mode: 'osm_nh44_corridor',
-  googleTilesConnected: false,
-  statusSummary:
-    'OpenStreetMap (ODbL) NH-44 Grand Trunk Road Alignment + Procedural PBR Environment active',
-  dataAttribution:
-    'Road Alignment & Waypoints © OpenStreetMap contributors (ODbL) · NH-44 Ambala–Karnal Corridor',
-  corridorName: 'NH-44 Grand Trunk Road (Ambala Cantt → Karnal Toll Plaza)',
-  originCoords: { lat: 30.3398, lng: 76.8367 },
-  destinationCoords: { lat: 29.7429, lng: 76.9684 },
-  loadedTilesCount: 0,
-};
 
 // Pre-allocated scratch vectors outside the animation loop (Zero GC)
 const _camTargetPos = new THREE.Vector3();
@@ -73,25 +67,32 @@ export default function App() {
   const [gameState, setGameState] = useState<GameLifecycleState>(
     initialAutostart ? 'playing' : 'title'
   );
-  const [telemetry, setTelemetry] = useState<TruckPhysicsState>(() => createInitialTruckState(60));
+  const [selectedTruck, setSelectedTruck] = useState<TruckModelId>('tata_prima_4928');
+  const [selectedMap, setSelectedMap] = useState<MapCorridorId>('nh44_plains');
+  const [telemetry, setTelemetry] = useState<TruckPhysicsState>(() =>
+    createInitialTruckState(60, 'tata_prima_4928')
+  );
   const [cameraMode, setCameraMode] = useState<CameraViewMode>('chase');
   const [timeOfDay, setTimeOfDay] = useState<TimeOfDayPreset>('golden');
-  // Default graphics tier is 'low' — pixel-perfect 3D geometry & textures with 60 FPS low-end optimizations
   const [graphicsQuality, setGraphicsQuality] = useState<GraphicsQuality>('low');
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [hudCollapsed, setHudCollapsed] = useState<boolean>(false);
   const [isTouchDevice, setIsTouchDevice] = useState<boolean>(false);
-  const [geospatialStatus, setGeospatialStatus] =
-    useState<GeospatialStatus>(INITIAL_GEOSPATIAL_STATUS);
+  const [gamepadConnected, setGamepadConnected] = useState<boolean>(false);
+  const [geospatialStatus, setGeospatialStatus] = useState<GeospatialStatus>(() =>
+    getBakedGeospatialStatus()
+  );
   const [outcomeSnapshot, setOutcomeSnapshot] = useState<RunOutcomeSnapshot | null>(null);
 
   // Mutable simulation refs so 60Hz loop never tears down or depends on React re-renders
   const canvasMountRef = useRef<HTMLDivElement | null>(null);
   const gameStateRef = useRef<GameLifecycleState>(initialAutostart ? 'playing' : 'title');
+  const selectedTruckRef = useRef<TruckModelId>('tata_prima_4928');
+  const selectedMapRef = useRef<MapCorridorId>('nh44_plains');
   const cameraModeRef = useRef<CameraViewMode>('chase');
   const timeOfDayRef = useRef<TimeOfDayPreset>('golden');
   const graphicsQualityRef = useRef<GraphicsQuality>('low');
-  const physicsRef = useRef<TruckPhysicsState>(createInitialTruckState(60));
+  const physicsRef = useRef<TruckPhysicsState>(createInitialTruckState(60, 'tata_prima_4928'));
   const trafficRef = useRef<TrafficVehicle[]>(createInitialTrafficFleet(60));
   const audioRef = useRef<TruckAudioEngine | null>(null);
   const runStartTimeRef = useRef<number>(performance.now());
@@ -106,6 +107,7 @@ export default function App() {
   }>({ left: false, right: false, throttle: false, brake: false });
   const shiftUpQueuedRef = useRef<boolean>(false);
   const shiftDownQueuedRef = useRef<boolean>(false);
+  const prevGamepadButtonsRef = useRef<boolean[]>([]);
 
   // Orbit camera spherical coordinates for 'orbit' inspection mode
   const orbitAnglesRef = useRef<{ yaw: number; pitch: number; distance: number }>({
@@ -122,7 +124,23 @@ export default function App() {
     gameStateRef.current = gameState;
   }, [gameState]);
 
-  // Detect touch device & probe Google 3D Tiles availability once
+  // Listen for Gamepad connect/disconnect
+  useEffect(() => {
+    const onGamepadConnect = () => setGamepadConnected(true);
+    const onGamepadDisconnect = () => {
+      const pads = navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) : [];
+      setGamepadConnected(pads.length > 0);
+    };
+    window.addEventListener('gamepadconnected', onGamepadConnect);
+    window.addEventListener('gamepaddisconnected', onGamepadDisconnect);
+
+    return () => {
+      window.removeEventListener('gamepadconnected', onGamepadConnect);
+      window.removeEventListener('gamepaddisconnected', onGamepadDisconnect);
+    };
+  }, []);
+
+  // Detect touch device
   useEffect(() => {
     const checkTouch = () => {
       const coarse = window.matchMedia?.('(pointer: coarse)').matches ?? false;
@@ -130,12 +148,39 @@ export default function App() {
     };
     checkTouch();
     window.addEventListener('resize', checkTouch);
-
-    probeGoogle3DTilesAvailability().then((status) => {
-      setGeospatialStatus(status);
-    });
-
     return () => window.removeEventListener('resize', checkTouch);
+  }, []);
+
+  // Select Truck Model (R7)
+  const handleSelectTruck = useCallback((truckId: TruckModelId) => {
+    selectedTruckRef.current = truckId;
+    physicsRef.current.truckModelId = truckId;
+    setSelectedTruck(truckId);
+    setTelemetry({ ...physicsRef.current });
+  }, []);
+
+  // Select Indian Highway Corridor Map (R8 & R9)
+  const handleSelectMap = useCallback((mapId: MapCorridorId) => {
+    setActiveMapId(mapId);
+    selectedMapRef.current = mapId;
+    setSelectedMap(mapId);
+
+    // Reposition truck & traffic smoothly onto the new map's spline alignment
+    const currentS = physicsRef.current.distanceAlongHighwayM;
+    const freshTruck = createInitialTruckState(currentS, selectedTruckRef.current);
+    freshTruck.transmissionMode = physicsRef.current.transmissionMode;
+    freshTruck.headlightsOn = physicsRef.current.headlightsOn;
+    physicsRef.current = freshTruck;
+    trafficRef.current = createInitialTrafficFleet(currentS);
+    setTelemetry({ ...freshTruck });
+
+    const corridorSpec = MAP_CORRIDORS[mapId];
+    setGeospatialStatus((prev) => ({
+      ...prev,
+      corridorName: `${corridorSpec.title} (${corridorSpec.subtitle})`,
+      originCoords: corridorSpec.originCoords,
+      destinationCoords: corridorSpec.destinationCoords,
+    }));
   }, []);
 
   // State transition handlers
@@ -176,7 +221,7 @@ export default function App() {
       document.activeElement.blur();
     }
     keysHeldRef.current.clear();
-    const freshTruck = createInitialTruckState(60);
+    const freshTruck = createInitialTruckState(60, selectedTruckRef.current);
     freshTruck.transmissionMode = physicsRef.current.transmissionMode;
     freshTruck.headlightsOn = physicsRef.current.headlightsOn;
     physicsRef.current = freshTruck;
@@ -193,7 +238,7 @@ export default function App() {
   const handleReturnToTitle = useCallback(() => {
     keysHeldRef.current.clear();
     audioRef.current?.pause();
-    const freshTruck = createInitialTruckState(60);
+    const freshTruck = createInitialTruckState(60, selectedTruckRef.current);
     physicsRef.current = freshTruck;
     trafficRef.current = createInitialTrafficFleet(60);
     setTelemetry({ ...freshTruck });
@@ -312,7 +357,7 @@ export default function App() {
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 0.88;
-    renderer.setPixelRatio(1); // Default 'low' starts at crisp 1.0 pixel ratio for zero lag
+    renderer.setPixelRatio(1);
     renderer.setSize(initW, initH);
     renderer.shadowMap.enabled = false;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -323,16 +368,15 @@ export default function App() {
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(62, initW / initH, 0.16, 1150);
 
-    // Optional Post-Processing Pipeline (Active ONLY in 'ultra' mode on hardware GPUs, with high threshold 1.55 so sky never blooms!)
     let composer: EffectComposer | null = null;
     if (!isSoftwareGl) {
       composer = new EffectComposer(renderer);
       composer.addPass(new RenderPass(scene, camera));
       const bloomPass = new UnrealBloomPass(
         new THREE.Vector2(Math.round(initW * 0.5), Math.round(initH * 0.5)),
-        0.12, // Subtle optical bloom restricted strictly to HDR emissive vehicle lamps
+        0.12,
         0.25,
-        1.55 // Above Sky shader luminance (~1.1) so sky/horizon/road never wash out!
+        1.55
       );
       composer.addPass(bloomPass);
       composer.addPass(new OutputPass());
@@ -357,7 +401,7 @@ export default function App() {
     const sunLight = new THREE.DirectionalLight(0xffedd5, 2.25);
     sunLight.position.set(-85, 68, -60);
     if (!isSoftwareGl) {
-      sunLight.castShadow = false; // Enabled dynamically on Medium/High/Ultra
+      sunLight.castShadow = false;
       sunLight.shadow.mapSize.width = 1024;
       sunLight.shadow.mapSize.height = 1024;
       sunLight.shadow.camera.near = 5;
@@ -373,17 +417,15 @@ export default function App() {
     scene.add(sunLight);
     scene.add(sunLight.target);
 
-    // Linear distance fog starting at 340m so 0m..340m ahead of the truck is 100% crystal-clear!
     const fogColor = new THREE.Color(0xd5a782);
     scene.background = fogColor;
     const linearFog = new THREE.Fog(fogColor.getHex(), 340, 1180);
     scene.fog = linearFog;
 
-    // 5. Build Procedural PBR Textures, NH-44 Highway Environment, Player Rig & AI Traffic
+    // 5. Build Procedural PBR Textures, Active Highway Environment, Active Player Rig & AI Traffic
     const maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
     const textures = createHighwayTextureSet(Math.min(4, maxAnisotropy));
 
-    // High-altitude atmospheric cirrus cloud canopy plane (with fog: false so it never turns into a fog ceiling!)
     const cloudPlane = new THREE.Mesh(
       new THREE.PlaneGeometry(2200, 2200),
       new THREE.MeshBasicMaterial({
@@ -399,10 +441,20 @@ export default function App() {
     cloudPlane.position.y = 240;
     scene.add(cloudPlane);
 
-    const envHandles: HighwayEnvironmentHandles = buildHighwayEnvironment(textures, isSoftwareGl);
+    let activeBuiltMapId: MapCorridorId = selectedMapRef.current;
+    let envHandles: HighwayEnvironmentHandles = buildHighwayEnvironment(
+      textures,
+      isSoftwareGl,
+      activeBuiltMapId
+    );
     scene.add(envHandles.root);
 
-    const playerRig: PlayerRigMeshes = buildPlayerTruckAndTrailer(textures, isSoftwareGl);
+    let activeBuiltTruckId: TruckModelId = selectedTruckRef.current;
+    let playerRig: PlayerRigMeshes = buildPlayerTruckAndTrailer(
+      textures,
+      isSoftwareGl,
+      activeBuiltTruckId
+    );
     scene.add(playerRig.tractorRoot);
     scene.add(playerRig.trailerRoot);
 
@@ -417,7 +469,7 @@ export default function App() {
     playerRig.rightMirrorMesh.material = mirrorMat;
     playerRig.leftMirrorMesh.material = mirrorMat;
 
-    // Build high-detail 3D meshes for the 24 AI Traffic Vehicles (using cached geometries)
+    // Build high-detail 3D meshes for the 24 AI Traffic Vehicles
     const trafficMeshes: { root: THREE.Group; brakeMat: THREE.MeshBasicMaterial }[] = [];
     for (const tv of trafficRef.current) {
       const tm = buildTrafficVehicleMesh(tv.archetype, tv.colorHex, textures);
@@ -425,12 +477,34 @@ export default function App() {
       trafficMeshes.push(tm);
     }
 
+    // Atmospheric Highway Dust & Airflow Motes for tactile speed immersion
+    const dustCount = 220;
+    const dustPositions = new Float32Array(dustCount * 3);
+    for (let i = 0; i < dustCount; i++) {
+      dustPositions[i * 3] = (Math.random() - 0.5) * 44;
+      dustPositions[i * 3 + 1] = 0.3 + Math.random() * 7.5;
+      dustPositions[i * 3 + 2] = (Math.random() - 0.5) * 90;
+    }
+    const dustGeo = new THREE.BufferGeometry();
+    dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPositions, 3));
+    const dustMat = new THREE.PointsMaterial({
+      color: 0xfef3c7,
+      size: 0.14,
+      transparent: true,
+      opacity: 0.42,
+      depthWrite: false,
+    });
+    const dustParticles = new THREE.Points(dustGeo, dustMat);
+    scene.add(dustParticles);
+
     // Dynamic 4-Tier Graphics Quality Configurator ('low' | 'medium' | 'high' | 'ultra')
     let lastAppliedTier: GraphicsQuality | null = null;
     let activeTrafficCullDist = 380;
     let activeMirrorInterval = 4;
 
     const syncGraphicsTier = (tier: GraphicsQuality) => {
+      envHandles.ultraDetailGroup.visible = tier === 'high' || tier === 'ultra';
+      dustParticles.visible = tier !== 'low';
       if (lastAppliedTier === tier) return;
       lastAppliedTier = tier;
 
@@ -459,11 +533,11 @@ export default function App() {
           sunLight.shadow.map?.dispose();
           sunLight.shadow.map = null;
         }
-        camera.far = 1020;
+        camera.far = 1080;
         camera.updateProjectionMatrix();
-        mirrorCamera.far = 155;
+        mirrorCamera.far = 165;
         mirrorCamera.updateProjectionMatrix();
-        activeTrafficCullDist = 440;
+        activeTrafficCullDist = 460;
         activeMirrorInterval = 3;
       } else if (tier === 'high') {
         renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(dpr, 1.65));
@@ -475,44 +549,51 @@ export default function App() {
           sunLight.shadow.map?.dispose();
           sunLight.shadow.map = null;
         }
-        camera.far = 1120;
+        camera.far = 1450;
         camera.updateProjectionMatrix();
-        mirrorCamera.far = 200;
+        mirrorCamera.far = 220;
         mirrorCamera.updateProjectionMatrix();
-        activeTrafficCullDist = 520;
+        activeTrafficCullDist = 640;
         activeMirrorInterval = 2;
       } else {
-        // ULTRA 4K UHD Tier
         textures.upgradeToUltra4K(maxAnisotropy);
         renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(dpr, 2.0));
         renderer.setSize(w, h);
         composer?.setSize(w, h);
         renderer.shadowMap.enabled = !isSoftwareGl;
         sunLight.castShadow = !isSoftwareGl;
-        if (!isSoftwareGl && sunLight.shadow.mapSize.width !== 2048) {
-          sunLight.shadow.mapSize.set(2048, 2048);
+        if (!isSoftwareGl && sunLight.shadow.mapSize.width !== 4096) {
+          sunLight.shadow.mapSize.set(4096, 4096);
           sunLight.shadow.map?.dispose();
           sunLight.shadow.map = null;
         }
-        camera.far = 1250;
+        camera.far = 2200;
         camera.updateProjectionMatrix();
-        mirrorCamera.far = 250;
+        mirrorCamera.far = 320;
         mirrorCamera.updateProjectionMatrix();
-        activeTrafficCullDist = 680;
+        activeTrafficCullDist = 960;
         activeMirrorInterval = 1;
       }
+      lastAppliedPresetKey = ''; // Force fog range re-sync with new tier
     };
 
-    // Apply Time-of-Day Physical Sky & Crystal-Clear Linear Fog Preset
-    let lastAppliedPreset: TimeOfDayPreset | null = null;
-    const applyLightingPreset = (preset: TimeOfDayPreset, truckZ: number) => {
+    // Apply Time-of-Day & Map-Specific Atmospheric Palette
+    let lastAppliedPresetKey = '';
+    const applyLightingPreset = (
+      preset: TimeOfDayPreset,
+      mapId: MapCorridorId,
+      truckZ: number
+    ) => {
       sky.position.set(0, 0, truckZ);
       cloudPlane.position.z = truckZ - 180;
 
+      const isUltra = graphicsQualityRef.current === 'ultra';
+      const presetKey = `${preset}:${mapId}:${isUltra ? 'u' : 's'}`;
       if (preset === 'golden') {
-        if (lastAppliedPreset !== preset) {
-          skyUniforms['turbidity'].value = 4.6;
-          skyUniforms['rayleigh'].value = 1.85;
+        if (lastAppliedPresetKey !== presetKey) {
+          skyUniforms['turbidity'].value =
+            mapId === 'nh48_ghats' ? 3.8 : mapId === 'nh66_coastal' ? 3.2 : 4.6;
+          skyUniforms['rayleigh'].value = mapId === 'nh66_coastal' ? 2.1 : 1.85;
           skyUniforms['mieCoefficient'].value = 0.0045;
           skyUniforms['mieDirectionalG'].value = 0.78;
           const phi = THREE.MathUtils.degToRad(90 - 14.5);
@@ -520,7 +601,13 @@ export default function App() {
           _sunDir.setFromSphericalCoords(1, phi, theta);
           skyUniforms['sunPosition'].value.copy(_sunDir);
 
-          fogColor.setHex(0xd5a782);
+          fogColor.setHex(
+            mapId === 'nh48_ghats'
+              ? 0xb5c9b8
+              : mapId === 'nh66_coastal'
+                ? 0xcbd5e1
+                : 0xd5a782
+          );
           hemiLight.color.setHex(0xfde68a);
           hemiLight.groundColor.setHex(0x44403c);
           hemiLight.intensity = 0.88;
@@ -530,13 +617,13 @@ export default function App() {
           envHandles.streetLightHeadsMat.color.setHex(0xfef08a);
           cloudPlane.visible = true;
           sky.visible = true;
-          linearFog.near = 350;
-          linearFog.far = 1180;
-          lastAppliedPreset = preset;
+          linearFog.near = isUltra ? 480 : 350;
+          linearFog.far = isUltra ? 1750 : 1180;
+          lastAppliedPresetKey = presetKey;
         }
         sunLight.position.set(-110, 56, truckZ - 140);
       } else if (preset === 'day') {
-        if (lastAppliedPreset !== preset) {
+        if (lastAppliedPresetKey !== presetKey) {
           skyUniforms['turbidity'].value = 2.6;
           skyUniforms['rayleigh'].value = 1.25;
           skyUniforms['mieCoefficient'].value = 0.003;
@@ -546,7 +633,13 @@ export default function App() {
           _sunDir.setFromSphericalCoords(1, phi, theta);
           skyUniforms['sunPosition'].value.copy(_sunDir);
 
-          fogColor.setHex(0x9bd2fc);
+          fogColor.setHex(
+            mapId === 'nh48_ghats'
+              ? 0xa7f3d0
+              : mapId === 'nh66_coastal'
+                ? 0xbae6fd
+                : 0x9bd2fc
+          );
           hemiLight.color.setHex(0xe0f2fe);
           hemiLight.groundColor.setHex(0x57534e);
           hemiLight.intensity = 0.96;
@@ -556,14 +649,13 @@ export default function App() {
           envHandles.streetLightHeadsMat.color.setHex(0x94a3b8);
           cloudPlane.visible = true;
           sky.visible = true;
-          linearFog.near = 380;
-          linearFog.far = 1220;
-          lastAppliedPreset = preset;
+          linearFog.near = isUltra ? 520 : 380;
+          linearFog.far = isUltra ? 1850 : 1220;
+          lastAppliedPresetKey = presetKey;
         }
         sunLight.position.set(65, 140, truckZ - 60);
       } else {
-        // Dusk / Night Highway Mode
-        if (lastAppliedPreset !== preset) {
+        if (lastAppliedPresetKey !== presetKey) {
           fogColor.setHex(0x060a14);
           hemiLight.color.setHex(0x1e293b);
           hemiLight.groundColor.setHex(0x090d16);
@@ -574,9 +666,9 @@ export default function App() {
           envHandles.streetLightHeadsMat.color.setHex(0xfef08a);
           cloudPlane.visible = false;
           sky.visible = false;
-          linearFog.near = 240;
-          linearFog.far = 860;
-          lastAppliedPreset = preset;
+          linearFog.near = isUltra ? 320 : 240;
+          linearFog.far = isUltra ? 1150 : 860;
+          lastAppliedPresetKey = presetKey;
         }
         sunLight.position.set(-60, 80, truckZ - 80);
       }
@@ -584,7 +676,6 @@ export default function App() {
       linearFog.color.copy(fogColor);
     };
 
-    // Initialize camera and default graphics tier ('low') immediately
     syncGraphicsTier(graphicsQualityRef.current);
     const initP = physicsRef.current;
     camera.position.set(initP.x + 7.5, initP.y + 3.1, initP.z - 8.2);
@@ -734,21 +825,75 @@ export default function App() {
       const subSteps = isSoftwareGl && rawDt > 0.045 ? 2 : 1;
       const stepDt = Math.min(rawDt / subSteps, 0.045);
 
-      // Apply any Graphics Tier change immediately
       syncGraphicsTier(graphicsQualityRef.current);
+
+      // Dynamic 3D Map Rebuild when user switches between NH-44 Plains, NH-48 Ghats, or NH-66 Coastal (R8 & R9)
+      if (selectedMapRef.current !== activeBuiltMapId) {
+        activeBuiltMapId = selectedMapRef.current;
+        scene.remove(envHandles.root);
+        envHandles = buildHighwayEnvironment(textures, isSoftwareGl, activeBuiltMapId);
+        envHandles.ultraDetailGroup.visible =
+          graphicsQualityRef.current === 'high' || graphicsQualityRef.current === 'ultra';
+        scene.add(envHandles.root);
+        lastAppliedPresetKey = ''; // Force sky & fog re-sync for the new map
+      }
+
+      // Dynamic 3D Truck Rig Rebuild when user switches between Tata Prima, Ashok Leyland, or BharatBenz (R7)
+      if (selectedTruckRef.current !== activeBuiltTruckId) {
+        activeBuiltTruckId = selectedTruckRef.current;
+        scene.remove(playerRig.tractorRoot);
+        scene.remove(playerRig.trailerRoot);
+        playerRig = buildPlayerTruckAndTrailer(textures, isSoftwareGl, activeBuiltTruckId);
+        playerRig.rightMirrorMesh.material = mirrorMat;
+        playerRig.leftMirrorMesh.material = mirrorMat;
+        scene.add(playerRig.tractorRoot);
+        scene.add(playerRig.trailerRoot);
+      }
+
+      // R1: Poll Client-Side Web Gamepad API (`navigator.getGamepads()`) for Controller / Steering Wheel input
+      let gpThrottle = 0;
+      let gpBrake = 0;
+      let gpSteer = 0;
+      let gpAirBrake = false;
+      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+      const activePad = pads ? pads[0] || pads[1] || pads[2] || pads[3] : null;
+      if (activePad) {
+        const rawAxisX = activePad.axes[0] ?? 0;
+        if (Math.abs(rawAxisX) > 0.08) {
+          gpSteer = -rawAxisX; // Left stick / wheel left (<0) -> positive steer input
+        }
+        if (activePad.buttons[7]) gpThrottle = activePad.buttons[7].value;
+        if (activePad.buttons[6]) gpBrake = activePad.buttons[6].value;
+        if (activePad.buttons[1]?.pressed) gpAirBrake = true;
+        if (activePad.buttons[0]?.pressed) physicsRef.current.hornActive = true;
+
+        const prevBtns = prevGamepadButtonsRef.current;
+        const r1Pressed = Boolean(activePad.buttons[5]?.pressed);
+        const l1Pressed = Boolean(activePad.buttons[4]?.pressed);
+        const yPressed = Boolean(activePad.buttons[3]?.pressed);
+        if (r1Pressed && !prevBtns[5]) shiftUpQueuedRef.current = true;
+        if (l1Pressed && !prevBtns[4]) shiftDownQueuedRef.current = true;
+        if (yPressed && !prevBtns[3]) handleCycleCamera();
+        prevGamepadButtonsRef.current = activePad.buttons.map((b) => b.pressed);
+      }
 
       const keys = keysHeldRef.current;
       const touch = touchHeldRef.current;
 
-      const throttle =
-        keys.has('KeyW') || keys.has('ArrowUp') || touch.throttle ? 1.0 : 0.0;
-      const brake =
-        keys.has('KeyS') || keys.has('ArrowDown') || touch.brake ? 1.0 : 0.0;
-      const serviceAirBrake = keys.has('Space');
+      const throttle = Math.max(
+        gpThrottle,
+        keys.has('KeyW') || keys.has('ArrowUp') || touch.throttle ? 1.0 : 0.0
+      );
+      const brake = Math.max(
+        gpBrake,
+        keys.has('KeyS') || keys.has('ArrowDown') || touch.brake ? 1.0 : 0.0
+      );
+      const serviceAirBrake = keys.has('Space') || gpAirBrake;
       const steerLeft = keys.has('KeyA') || keys.has('ArrowLeft') || touch.left ? 1.0 : 0.0;
       const steerRight =
         keys.has('KeyD') || keys.has('ArrowRight') || touch.right ? 1.0 : 0.0;
-      const steer = steerLeft - steerRight;
+      const keySteer = steerLeft - steerRight;
+      const steer = Math.abs(gpSteer) > Math.abs(keySteer) ? gpSteer : keySteer;
 
       const pState = physicsRef.current;
 
@@ -775,16 +920,17 @@ export default function App() {
           const elapsedSec = Math.max(1, (performance.now() - runStartTimeRef.current) / 1000);
           const mins = Math.floor(elapsedSec / 60);
           const secs = Math.floor(elapsedSec % 60);
+          const mSpec = MAP_CORRIDORS[activeBuiltMapId];
           const snapshot: RunOutcomeSnapshot = {
             victory: isVictory,
             reason: isVictory
-              ? 'Cleared Karnal FASTag Toll Plaza on NH-44 Grand Trunk Corridor with heavy container freight intact.'
-              : 'Excessive highway barrier or traffic impacts compromised the container cargo.',
+              ? `Cleared ${mSpec.title} destination FASTag Toll Plaza with heavy freight intact.`
+              : 'Excessive highway barrier or traffic impacts compromised the freight cargo.',
             distanceKm: (pState.distanceAlongHighwayM / 1000).toFixed(2),
             elapsedTimeFormatted: `${mins}:${secs.toString().padStart(2, '0')}`,
             avgSpeedKmh: Math.round((pState.totalDistanceDrivenM / elapsedSec) * 3.6),
             cargoIntegrityPct: pState.cargoIntegrityPct,
-            fuelUsedLiters: (385 - pState.fuelLiters).toFixed(1),
+            fuelUsedLiters: (pState.fuelMaxLiters - pState.fuelLiters).toFixed(1),
           };
           audio.pause();
           document.body.dataset.state = 'gameover';
@@ -794,16 +940,40 @@ export default function App() {
         }
       } else if (gameStateRef.current === 'title') {
         elapsedSimTime += stepDt;
+        // Keep player rig positioned properly on the selected map spline during Title Tour
+        const titlePt = splineToWorld(pState.distanceAlongHighwayM, pState.lateralOffsetM, 0);
+        pState.x = titlePt.x;
+        pState.y = titlePt.y;
+        pState.z = titlePt.z;
+        pState.heading = titlePt.sample.heading;
+        pState.pitch = titlePt.sample.grade;
+        pState.trailerX = titlePt.x - Math.sin(titlePt.sample.heading) * 6.0;
+        pState.trailerY = titlePt.y;
+        pState.trailerZ = titlePt.z + Math.cos(titlePt.sample.heading) * 6.0;
+        pState.trailerHeading = titlePt.sample.heading;
         stepTrafficSimulation(trafficRef.current, pState, stepDt);
       }
 
-      // Sync 3D Player Tractor, Cabin Suspension, Needles, Fan, Exhaust & Trailer Meshes
+      // Sync 3D Player Tractor, Cabin Suspension, Shifter, Stalk, Needles, Fan, Exhaust & Trailer Meshes
       syncPlayerRigMeshes(
         playerRig,
         pState,
         brake > 0.1 || serviceAirBrake,
         isSoftwareGl
       );
+
+      // Update Atmospheric Speed Dust & Airflow Motes around the Truck
+      if (dustParticles.visible) {
+        dustParticles.position.set(pState.x, pState.y, pState.z - 18);
+        const dPos = dustGeo.attributes.position as THREE.BufferAttribute;
+        const flowSpeed = Math.max(2.5, pState.speedMs * 1.35) * rawDt;
+        for (let i = 0; i < dustCount; i++) {
+          let pz = dPos.getZ(i) + flowSpeed;
+          if (pz > 45) pz -= 90;
+          dPos.setZ(i, pz);
+        }
+        dPos.needsUpdate = true;
+      }
 
       // Update Live 1st-Person Instrument Cluster & Center-Console GPS Navigation Screen
       textures.updateCabinDisplays(
@@ -812,7 +982,7 @@ export default function App() {
         cameraModeRef.current === 'cabin'
       );
 
-      // Sync 3D AI Traffic Meshes with Distance Culling for Zero-Lag Low-End Performance
+      // Sync 3D AI Traffic Meshes with Distance Culling
       for (let i = 0; i < trafficRef.current.length; i++) {
         const tv = trafficRef.current[i];
         const tm = trafficMeshes[i];
@@ -827,8 +997,8 @@ export default function App() {
         }
       }
 
-      // Update Sun, Physical Sky & Directional Shadow Frustum to follow Player Rig
-      applyLightingPreset(timeOfDayRef.current, pState.z);
+      // Update Sun, Physical Sky & Directional Shadow Frustum
+      applyLightingPreset(timeOfDayRef.current, activeBuiltMapId, pState.z);
       sunLight.target.position.set(pState.x, pState.y, pState.z - 15);
 
       // Render Live Rear-View Wing Mirror when in 1st-Person Cabin View
@@ -853,11 +1023,23 @@ export default function App() {
         playerRig.leftMirrorMesh.visible = true;
       }
 
-      // Camera Choreography (Title Pan / 3rd-Person Chase / 1st-Person RHD Cabin / Free Orbit)
+      // R4: State-Driven Camera Shake (scales with speed, road surface roughness & impact trauma; 0 when stopped!)
       const camDamp = 1 - Math.exp(-8.5 * Math.max(0.016, rawDt));
-      const shakeMag = pState.cameraTrauma * pState.cameraTrauma * 0.22;
-      const shakeX = Math.sin(elapsedSimTime * 37) * shakeMag;
-      const shakeY = Math.cos(elapsedSimTime * 43) * shakeMag;
+      const speedFactor = Math.min(1.0, pState.speedKmh / 85);
+      const surfaceFactor =
+        pState.currentSurface === 'offroad'
+          ? 2.8
+          : pState.currentSurface === 'shoulder'
+            ? 1.9
+            : pState.currentSurface === 'median'
+              ? 2.3
+              : 0.35;
+      const continuousRoadVib =
+        pState.speedKmh > 0.4 ? speedFactor * surfaceFactor * 0.018 : 0.0;
+      const impactShake = pState.cameraTrauma * pState.cameraTrauma * 0.22;
+      const totalShakeMag = continuousRoadVib + impactShake;
+      const shakeX = Math.sin(elapsedSimTime * 34) * totalShakeMag;
+      const shakeY = Math.cos(elapsedSimTime * 41) * totalShakeMag;
 
       if (gameStateRef.current === 'title') {
         const panAngle = -0.75 + Math.sin(elapsedSimTime * 0.25) * 0.35;
@@ -874,13 +1056,14 @@ export default function App() {
         playerRig.cabinCameraAnchor.getWorldPosition(_cabinWorldPos);
         const fwdX = Math.sin(pState.heading);
         const fwdZ = -Math.cos(pState.heading);
-        const lookTurnYaw = pState.heading + pState.steerAngleRad * 0.45;
+        // Immersive corner-apex head-look + subtle lateral G-force head shift
+        const lookTurnYaw = pState.heading + pState.steerAngleRad * 0.55;
         const lookFwdX = Math.sin(lookTurnYaw);
         const lookFwdZ = -Math.cos(lookTurnYaw);
 
         camera.position.set(
-          _cabinWorldPos.x + shakeX * 0.35,
-          _cabinWorldPos.y + shakeY * 0.35,
+          _cabinWorldPos.x + shakeX * 0.45,
+          _cabinWorldPos.y + shakeY * 0.45 + Math.sin(elapsedSimTime * 5.2) * speedFactor * 0.006,
           _cabinWorldPos.z
         );
         _cabinLookPos.set(
@@ -889,6 +1072,7 @@ export default function App() {
           _cabinWorldPos.z + lookFwdZ * 26 + fwdZ * 2
         );
         camera.lookAt(_cabinLookPos);
+        camera.rotation.z += -pState.roll * 0.38;
         if (camera.fov !== 74) {
           camera.fov = 74;
           camera.updateProjectionMatrix();
@@ -909,9 +1093,9 @@ export default function App() {
         const fwdZ = -Math.cos(pState.heading);
         const rightX = Math.cos(pState.heading);
         const rightZ = Math.sin(pState.heading);
-        const chaseDist = 17.2 + Math.min(2.6, pState.speedKmh * 0.025);
+        const chaseDist = 17.2 + Math.min(2.8, pState.speedKmh * 0.028);
         const chaseHeight = 5.35;
-        const driverSideOffset = 1.35 - pState.steerAngleRad * 2.2;
+        const driverSideOffset = 1.35 - pState.steerAngleRad * 2.4;
 
         _camTargetPos.set(
           pState.x - fwdX * chaseDist + rightX * driverSideOffset + shakeX,
@@ -927,25 +1111,21 @@ export default function App() {
         );
         camera.lookAt(_camLookTarget);
 
-        const targetFov = 60 + Math.min(8, pState.speedKmh * 0.075);
+        const targetFov = 60 + Math.min(9.5, pState.speedKmh * 0.085);
         if (Math.abs(camera.fov - targetFov) > 0.2) {
           camera.fov += (targetFov - camera.fov) * 0.1;
           camera.updateProjectionMatrix();
         }
       }
 
-      // Update Procedural Diesel & Highway Audio
       audio.update(pState, gameStateRef.current === 'playing');
 
-      // Throttle React HUD Telemetry updates to ~10Hz
       const nowMs = performance.now();
       if (nowMs - lastHudSyncTime > 95) {
         lastHudSyncTime = nowMs;
         setTelemetry({ ...pState });
       }
 
-      // Render: Direct MSAA forward pass on Low/Med/High for zero post-processing lag,
-      // or high-threshold lamp-only bloom pass on Ultra!
       if (composer && graphicsQualityRef.current === 'ultra') {
         composer.render();
       } else {
@@ -972,6 +1152,8 @@ export default function App() {
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('resize', onResize);
+      dustGeo.dispose();
+      dustMat.dispose();
       mirrorRenderTarget.dispose();
       composer?.dispose();
       audio.dispose();
@@ -1004,12 +1186,15 @@ export default function App() {
       <SimulatorHUD
         gameState={gameState}
         telemetry={telemetry}
+        selectedTruck={selectedTruck}
+        selectedMap={selectedMap}
         cameraMode={cameraMode}
         timeOfDay={timeOfDay}
         graphicsQuality={graphicsQuality}
         isMuted={isMuted}
         hudCollapsed={hudCollapsed}
         isTouchDevice={isTouchDevice}
+        gamepadConnected={gamepadConnected}
         geospatialStatus={geospatialStatus}
         outcomeSnapshot={outcomeSnapshot}
         onStartGame={handleStartGame}
@@ -1017,6 +1202,8 @@ export default function App() {
         onPauseGame={handlePauseGame}
         onRestartGame={handleRestartGame}
         onReturnToTitle={handleReturnToTitle}
+        onSelectTruck={handleSelectTruck}
+        onSelectMap={handleSelectMap}
         onCycleCamera={handleCycleCamera}
         onCycleTimeOfDay={handleCycleTimeOfDay}
         onToggleGraphicsQuality={handleToggleGraphicsQuality}
@@ -1032,3 +1219,4 @@ export default function App() {
     </main>
   );
 }
+

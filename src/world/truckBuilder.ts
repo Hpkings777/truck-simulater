@@ -1,13 +1,18 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { applyUltraFlakeShaderToPaint, HighwayTextureSet } from './materialsAndTextures';
-import { TruckPhysicsState } from '../physics/vehiclePhysics';
+import { TruckModelId, TruckPhysicsState } from '../physics/vehiclePhysics';
 import { TrafficArchetype } from '../physics/trafficSimulation';
 
 export interface PlayerRigMeshes {
+  truckModelId: TruckModelId;
   tractorRoot: THREE.Group;
   cabinSuspensionGroup: THREE.Group;
   trailerRoot: THREE.Group;
   steeringWheelGroup: THREE.Group;
+  shifterPivotGroup: THREE.Group;
+  indicatorStalkPivot: THREE.Group;
+  garlandGroup: THREE.Group;
   rpmNeedle: THREE.Mesh;
   speedNeedle: THREE.Mesh;
   frontLeftSteerPivot: THREE.Group;
@@ -242,17 +247,54 @@ function getSharedContactShadowMaterial(): THREE.MeshBasicMaterial {
  */
 export function buildPlayerTruckAndTrailer(
   textures: HighwayTextureSet,
-  isSoftwareGl: boolean
+  isSoftwareGl: boolean,
+  truckModelId: TruckModelId = 'tata_prima_4928'
 ): PlayerRigMeshes {
   const tractorRoot = new THREE.Group();
   const cabinSuspensionGroup = new THREE.Group();
   tractorRoot.add(cabinSuspensionGroup);
 
+  // Load verified GLB badge/chassis auxiliary mesh from /models/<truckModelId>.glb
+  const gltfLoader = new GLTFLoader();
+  gltfLoader.load(
+    `/models/${truckModelId}.glb`,
+    (gltf) => {
+      gltf.scene.name = `glb_${truckModelId}`;
+      tractorRoot.add(gltf.scene);
+    },
+    undefined,
+    () => {
+      // Graceful fallback if offline
+    }
+  );
+
+  // Distinct Primary & Secondary Paint Palette per Truck Model (R7)
+  const primaryColorHex =
+    truckModelId === 'ashok_leyland_3520'
+      ? 0xeab308 // Traditional Indian Highway Saffron-Gold Cab
+      : truckModelId === 'bharatbenz_4228r'
+      ? 0x1d4ed8 // BharatBenz Cobalt-Blue Metallic Cab
+      : 0xb9380b; // Tata Prima Crimson Metallic Cab
+
+  const secondaryColorHex =
+    truckModelId === 'ashok_leyland_3520'
+      ? 0x14532d // Traditional Deep Forest Green Cladding
+      : truckModelId === 'bharatbenz_4228r'
+      ? 0x334155 // Industrial Slate Metallic Cladding
+      : 0x18181b; // Satin Obsidian Cladding
+
+  const trimAccentHex =
+    truckModelId === 'ashok_leyland_3520'
+      ? 0xdc2626 // Traditional Vermilion Red Trim
+      : truckModelId === 'bharatbenz_4228r'
+      ? 0x38bdf8 // Cyan-Silver Accent Stripe
+      : 0xf59e0b; // Gold Trim
+
   // Calibrated PBR Materials with Custom GLSL Metallic Flake Clearcoat Shader
   const cabPaintMat = new THREE.MeshPhysicalMaterial({
-    color: 0xb9380b, // Deep Metallic Saffron Crimson
-    metalness: 0.68,
-    roughness: 0.2,
+    color: primaryColorHex,
+    metalness: truckModelId === 'ashok_leyland_3520' ? 0.35 : 0.68,
+    roughness: truckModelId === 'ashok_leyland_3520' ? 0.32 : 0.2,
     clearcoat: isSoftwareGl ? 0 : 1.0,
     clearcoatRoughness: 0.1,
   });
@@ -261,13 +303,13 @@ export function buildPlayerTruckAndTrailer(
   }
 
   const cabSecondaryPaintMat = new THREE.MeshPhysicalMaterial({
-    color: 0x18181b, // Satin Obsidian Cladding
+    color: secondaryColorHex,
     metalness: 0.35,
     roughness: 0.42,
     clearcoat: isSoftwareGl ? 0 : 0.4,
   });
   const cabTrimGoldMat = new THREE.MeshStandardMaterial({
-    color: 0xf59e0b,
+    color: trimAccentHex,
     metalness: 0.65,
     roughness: 0.28,
   });
@@ -589,28 +631,135 @@ export function buildPlayerTruckAndTrailer(
   rearCabWindow.position.set(0, 2.48, -0.4);
   cabinSuspensionGroup.add(rearCabWindow);
 
-  const roofProfile: [number, number][] = [
-    [-2.58, 2.98],
-    [-2.25, 3.36],
-    [-1.35, 3.74],
-    [-0.44, 3.82],
-    [-0.44, 3.04],
-    [-2.58, 3.04],
-  ];
-  const roofFairingMesh = new THREE.Mesh(
-    createSideProfileGeometry(roofProfile, 2.42, 0.1, 4),
-    cabPaintMat
-  );
-  roofFairingMesh.castShadow = !isSoftwareGl;
-  cabinSuspensionGroup.add(roofFairingMesh);
+  // Truck-Specific Roof & Upper Cab Silhouette (R7: 3 Visibly Different Truck Architectures)
+  if (truckModelId === 'tata_prima_4928') {
+    // 1. Tata Prima 4928.S: High Swept Aerodynamic Wind Deflector Fairing
+    const roofProfile: [number, number][] = [
+      [-2.58, 2.98],
+      [-2.25, 3.36],
+      [-1.35, 3.74],
+      [-0.44, 3.82],
+      [-0.44, 3.04],
+      [-2.58, 3.04],
+    ];
+    const roofFairingMesh = new THREE.Mesh(
+      createSideProfileGeometry(roofProfile, 2.42, 0.1, 4),
+      cabPaintMat
+    );
+    roofFairingMesh.castShadow = !isSoftwareGl;
+    cabinSuspensionGroup.add(roofFairingMesh);
 
-  const roofStripe = new THREE.Mesh(
-    createRoundedBoxGeometry(2.44, 0.12, 1.45, 0.03, 2),
-    cabTrimGoldMat
-  );
-  roofStripe.position.set(0, 3.42, -1.25);
-  roofStripe.rotation.x = 0.22;
-  cabinSuspensionGroup.add(roofStripe);
+    const roofStripe = new THREE.Mesh(
+      createRoundedBoxGeometry(2.44, 0.12, 1.45, 0.03, 2),
+      cabTrimGoldMat
+    );
+    roofStripe.position.set(0, 3.42, -1.25);
+    roofStripe.rotation.x = 0.22;
+    cabinSuspensionGroup.add(roofStripe);
+  } else if (truckModelId === 'ashok_leyland_3520') {
+    // 2. Ashok Leyland 3520 "Goods Carrier": Iconic Forward-Cantilevered Indian Wooden "Taj" Luton Crown Peak + Rigid High-Side Wooden Cargo Box
+    const tajCrownProfile: [number, number][] = [
+      [-3.12, 3.02],
+      [-3.28, 3.55],
+      [-2.85, 3.92],
+      [-1.05, 3.92],
+      [-0.42, 3.45],
+      [-0.42, 2.98],
+    ];
+    const tajCrownMesh = new THREE.Mesh(
+      createSideProfileGeometry(tajCrownProfile, 2.52, 0.08, 3),
+      new THREE.MeshStandardMaterial({ color: 0x15803d, roughness: 0.38, metalness: 0.2 })
+    );
+    tajCrownMesh.castShadow = !isSoftwareGl;
+    cabinSuspensionGroup.add(tajCrownMesh);
+
+    // Ornate Saffron & Vermilion Goods Carrier Front Plaque on the Taj Crown
+    const goodsPlaque = new THREE.Mesh(
+      createRoundedBoxGeometry(1.96, 0.42, 0.08, 0.02, 2),
+      new THREE.MeshBasicMaterial({ color: 0xfef08a })
+    );
+    goodsPlaque.position.set(0, 3.48, -3.22);
+    goodsPlaque.rotation.x = 0.18;
+    cabinSuspensionGroup.add(goodsPlaque);
+
+    const goodsPlaqueBorder = new THREE.Mesh(
+      createRoundedBoxGeometry(2.12, 0.52, 0.06, 0.02, 2),
+      new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.4 })
+    );
+    goodsPlaqueBorder.position.set(0, 3.48, -3.2);
+    goodsPlaqueBorder.rotation.x = 0.18;
+    cabinSuspensionGroup.add(goodsPlaqueBorder);
+
+    // Rigid 10-Wheeler High-Side Slatted Teakwood Cargo Body + Royal Blue Tarpaulin Dome mounted on tractorRoot
+    const woodenCargoGroup = new THREE.Group();
+    const woodPlankMat = new THREE.MeshStandardMaterial({
+      color: 0x9a3412,
+      normalMap: textures.containerNormalMap,
+      roughness: 0.72,
+    });
+    const tarpDomeMat = new THREE.MeshStandardMaterial({
+      color: 0x1d4ed8,
+      roughness: 0.65,
+    });
+    const cargoBodyBox = new THREE.Mesh(
+      createRoundedBoxGeometry(2.54, 2.25, 5.4, 0.05, 2),
+      woodPlankMat
+    );
+    cargoBodyBox.position.set(0, 2.02, 2.35);
+    cargoBodyBox.castShadow = !isSoftwareGl;
+    woodenCargoGroup.add(cargoBodyBox);
+
+    // Slatted horizontal emerald/yellow painted rib bands along wooden cargo sides
+    for (let r = 0; r < 4; r++) {
+      const rib = new THREE.Mesh(
+        new THREE.BoxGeometry(2.58, 0.1, 5.42),
+        r % 2 === 0 ? cabPaintMat : cabSecondaryPaintMat
+      );
+      rib.position.set(0, 1.18 + r * 0.52, 2.35);
+      woodenCargoGroup.add(rib);
+    }
+
+    // Arched Royal-Blue Tarpaulin Roof Dome over Cargo Bed
+    const tarpDome = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.26, 1.26, 5.38, 16, 1, false, 0, Math.PI).rotateZ(Math.PI / 2).rotateY(Math.PI / 2),
+      tarpDomeMat
+    );
+    tarpDome.scale.set(1, 0.42, 1);
+    tarpDome.position.set(0, 3.12, 2.35);
+    woodenCargoGroup.add(tarpDome);
+
+    // Rear "HORN PLEASE" Tailgate on Rigid Cargo Body
+    const rearTailgate = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.38, 2.15),
+      new THREE.MeshStandardMaterial({ map: textures.lorryTailgateMap, roughness: 0.55 })
+    );
+    rearTailgate.position.set(0, 2.02, 5.06);
+    woodenCargoGroup.add(rearTailgate);
+
+    tractorRoot.add(woodenCargoGroup);
+  } else {
+    // 3. BharatBenz 4228R Tanker: Low-Profile Flat Industrial Cab Roof with Chrome Air-Conditioning Pod & Twin Hazard Lightbar
+    const flatRoofCap = new THREE.Mesh(
+      createRoundedBoxGeometry(2.38, 0.24, 2.08, 0.06, 3),
+      cabPaintMat
+    );
+    flatRoofCap.position.set(0, 3.12, -1.48);
+    cabinSuspensionGroup.add(flatRoofCap);
+
+    const roofAcUnit = new THREE.Mesh(
+      createRoundedBoxGeometry(1.15, 0.22, 0.88, 0.05, 3),
+      chromeMat
+    );
+    roofAcUnit.position.set(0, 3.32, -1.35);
+    cabinSuspensionGroup.add(roofAcUnit);
+
+    const hazmatLightbar = new THREE.Mesh(
+      createRoundedBoxGeometry(1.65, 0.12, 0.24, 0.03, 2),
+      new THREE.MeshBasicMaterial({ color: 0xf59e0b })
+    );
+    hazmatLightbar.position.set(0, 3.28, -2.22);
+    cabinSuspensionGroup.add(hazmatLightbar);
+  }
 
   // Twin Roof-Mounted Amber Heavy Haulage Beacon Strobe Domes
   for (const side of [-1, 1]) {
@@ -997,20 +1146,25 @@ export function buildPlayerTruckAndTrailer(
   shifterBoot.position.set(0.18, 1.78, -1.58);
   cabinSuspensionGroup.add(shifterBoot);
 
+  // Interactive 3D Gear Shift Lever Pivot Group (moves physically with gear changes — R6)
+  const shifterPivotGroup = new THREE.Group();
+  shifterPivotGroup.position.set(0.18, 1.78, -1.58);
+
   const shifterRod = new THREE.Mesh(
     new THREE.CylinderGeometry(0.014, 0.016, 0.28, 10),
     chromeMat
   );
-  shifterRod.position.set(0.18, 1.92, -1.58);
+  shifterRod.position.set(0, 0.14, 0);
   shifterRod.rotation.z = -0.12;
-  cabinSuspensionGroup.add(shifterRod);
+  shifterPivotGroup.add(shifterRod);
 
   const shifterKnob = new THREE.Mesh(
     createRoundedBoxGeometry(0.055, 0.085, 0.065, 0.02, 3),
     leatherDashMat
   );
-  shifterKnob.position.set(0.2, 2.06, -1.58);
-  cabinSuspensionGroup.add(shifterKnob);
+  shifterKnob.position.set(0.02, 0.28, 0);
+  shifterPivotGroup.add(shifterKnob);
+  cabinSuspensionGroup.add(shifterPivotGroup);
 
   const overheadConsole = new THREE.Mesh(
     createRoundedBoxGeometry(2.28, 0.22, 0.46, 0.04, 3),
@@ -1018,6 +1172,80 @@ export function buildPlayerTruckAndTrailer(
   );
   overheadConsole.position.set(0, 2.94, -2.38);
   cabinSuspensionGroup.add(overheadConsole);
+
+  // Authentic Indian Truck Cabin Detailing (R6):
+  // 1. Marigold ("Genda Phool") Garland & Red/Gold Fringed Valance ("Jhalar") along Top Windshield Header
+  const garlandGroup = new THREE.Group();
+  garlandGroup.position.set(0, 2.83, -2.56);
+
+  const valanceStrip = new THREE.Mesh(
+    new THREE.BoxGeometry(2.22, 0.065, 0.025),
+    new THREE.MeshStandardMaterial({ color: 0x991b1b, roughness: 0.7 })
+  );
+  garlandGroup.add(valanceStrip);
+
+  const marigoldOrangeMat = new THREE.MeshStandardMaterial({
+    color: 0xf97316,
+    emissive: 0x9a3412,
+    emissiveIntensity: 0.22,
+    roughness: 0.6,
+  });
+  const marigoldYellowMat = new THREE.MeshStandardMaterial({
+    color: 0xfacc15,
+    emissive: 0x854d0e,
+    emissiveIntensity: 0.2,
+    roughness: 0.6,
+  });
+  const flowerGeo = new THREE.IcosahedronGeometry(0.026, 1);
+
+  for (let f = -16; f <= 16; f++) {
+    const fx = f * 0.066;
+    const catenarySag = Math.cos((f / 8) * Math.PI) * 0.032 - 0.042;
+    const flower = new THREE.Mesh(
+      flowerGeo,
+      Math.abs(f) % 2 === 0 ? marigoldOrangeMat : marigoldYellowMat
+    );
+    flower.position.set(fx, catenarySag, 0.015);
+    garlandGroup.add(flower);
+  }
+  // Hanging center marigold mala & brass bell ("Ghanti") below header
+  for (let v = 1; v <= 5; v++) {
+    const dropFlower = new THREE.Mesh(
+      flowerGeo,
+      v % 2 === 0 ? marigoldYellowMat : marigoldOrangeMat
+    );
+    dropFlower.position.set(0.02, -0.04 - v * 0.038, 0.02);
+    garlandGroup.add(dropFlower);
+  }
+  const brassBell = new THREE.Mesh(
+    new THREE.ConeGeometry(0.026, 0.048, 12),
+    cabTrimGoldMat
+  );
+  brassBell.position.set(0.02, -0.26, 0.02);
+  garlandGroup.add(brassBell);
+  cabinSuspensionGroup.add(garlandGroup);
+
+  // 2. Traditional Brass Dashboard Ornament & Teakwood Dash Inlay on Center Dash
+  const teakInlay = new THREE.Mesh(
+    createRoundedBoxGeometry(2.24, 0.042, 0.66, 0.01, 2),
+    new THREE.MeshStandardMaterial({ color: 0x7c2d12, roughness: 0.45, metalness: 0.15 })
+  );
+  teakInlay.position.set(0, 1.86, -2.3);
+  cabinSuspensionGroup.add(teakInlay);
+
+  const dashOrnamentBase = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.048, 0.058, 0.025, 16),
+    cabTrimGoldMat
+  );
+  dashOrnamentBase.position.set(-0.26, 1.9, -2.24);
+  cabinSuspensionGroup.add(dashOrnamentBase);
+
+  const dashOrnamentArch = new THREE.Mesh(
+    new THREE.TorusGeometry(0.046, 0.008, 10, 20, Math.PI),
+    cabTrimGoldMat
+  );
+  dashOrnamentArch.position.set(-0.26, 1.95, -2.24);
+  cabinSuspensionGroup.add(dashOrnamentArch);
 
   const tachographDisplay = new THREE.Mesh(
     new THREE.PlaneGeometry(0.26, 0.06),
@@ -1035,14 +1263,17 @@ export function buildPlayerTruckAndTrailer(
   steeringColumn.rotation.x = Math.PI / 2 - 0.42;
   cabinSuspensionGroup.add(steeringColumn);
 
+  const indicatorStalkPivot = new THREE.Group();
+  indicatorStalkPivot.position.set(0.58, 1.8, -1.94);
   for (const side of [-1, 1]) {
     const stalk = new THREE.Mesh(
       new THREE.CylinderGeometry(0.01, 0.014, 0.22, 8).rotateZ(Math.PI / 2),
       matteBumperMat
     );
-    stalk.position.set(0.58 + side * 0.12, 1.8, -1.94);
-    cabinSuspensionGroup.add(stalk);
+    stalk.position.set(side * 0.12, 0, 0);
+    indicatorStalkPivot.add(stalk);
   }
+  cabinSuspensionGroup.add(indicatorStalkPivot);
 
   const steeringWheelGroup = new THREE.Group();
   steeringWheelGroup.position.set(0.58, 1.84, -1.86);
@@ -1098,17 +1329,23 @@ export function buildPlayerTruckAndTrailer(
 
   cabinSuspensionGroup.add(steeringWheelGroup);
 
+  // Patterned Indian Bolster Seat Covers & Rear Sleeper Berth (R6)
+  const bolsterCoverMat = new THREE.MeshStandardMaterial({
+    color: 0x7f1d1d,
+    normalMap: textures.leatherNormalMap,
+    roughness: 0.72,
+  });
   for (const sx of [0.58, -0.58]) {
     const seatCushion = new THREE.Mesh(
       createRoundedBoxGeometry(0.56, 0.16, 0.56, 0.04, 3),
-      cabinUpholsteryMat
+      bolsterCoverMat
     );
     seatCushion.position.set(sx, 1.46, -1.24);
     cabinSuspensionGroup.add(seatCushion);
 
     const seatBack = new THREE.Mesh(
       createRoundedBoxGeometry(0.54, 0.78, 0.16, 0.04, 3),
-      cabinUpholsteryMat
+      bolsterCoverMat
     );
     seatBack.position.set(sx, 1.88, -1.02);
     seatBack.rotation.x = -0.08;
@@ -1116,11 +1353,26 @@ export function buildPlayerTruckAndTrailer(
 
     const headrest = new THREE.Mesh(
       createRoundedBoxGeometry(0.32, 0.24, 0.14, 0.04, 3),
-      leatherDashMat
+      cabTrimGoldMat
     );
     headrest.position.set(sx, 2.34, -0.98);
     cabinSuspensionGroup.add(headrest);
   }
+
+  // Rear Cabin Sleeper Berth & Bolster Pillow ("Gadda")
+  const sleeperBerth = new THREE.Mesh(
+    createRoundedBoxGeometry(2.22, 0.18, 0.54, 0.04, 3),
+    bolsterCoverMat
+  );
+  sleeperBerth.position.set(0, 1.44, -0.68);
+  cabinSuspensionGroup.add(sleeperBerth);
+
+  const bolsterPillow = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.11, 0.11, 0.58, 14).rotateX(Math.PI / 2),
+    cabTrimGoldMat
+  );
+  bolsterPillow.position.set(-0.78, 1.58, -0.68);
+  cabinSuspensionGroup.add(bolsterPillow);
 
   const cabinCameraAnchor = new THREE.Object3D();
   cabinCameraAnchor.position.set(0.58, 2.34, -1.32);
@@ -1189,28 +1441,95 @@ export function buildPlayerTruckAndTrailer(
     roughness: 0.52,
   });
 
-  const containerBox = new THREE.Mesh(new THREE.BoxGeometry(2.5, 2.72, 11.8), [
-    containerSideMat,
-    containerSideMat,
-    containerEndMat,
-    chassisSteelMat,
-    containerRearDoorMat,
-    containerEndMat,
-  ]);
-  containerBox.position.set(0, 2.58, 0);
-  containerBox.castShadow = !isSoftwareGl;
-  containerBox.receiveShadow = !isSoftwareGl;
-  trailerRoot.add(containerBox);
+  if (truckModelId === 'bharatbenz_4228r') {
+    // 3. BharatBenz 4228R Tanker Variant: Polished Stainless-Steel Cylindrical Petroleum Tanker Barrel
+    const tankBarrelGeo = new THREE.CylinderGeometry(1.18, 1.18, 11.4, 32).rotateX(Math.PI / 2);
+    const tankBarrelMat = new THREE.MeshPhysicalMaterial({
+      color: 0xe2e8f0,
+      metalness: 0.92,
+      roughness: 0.14,
+      clearcoat: isSoftwareGl ? 0 : 0.85,
+    });
+    const tankBarrel = new THREE.Mesh(tankBarrelGeo, tankBarrelMat);
+    tankBarrel.scale.set(1.06, 0.92, 1);
+    tankBarrel.position.set(0, 2.38, 0);
+    tankBarrel.castShadow = !isSoftwareGl;
+    trailerRoot.add(tankBarrel);
 
-  const cornerGeo = new THREE.BoxGeometry(0.18, 0.18, 0.18);
-  for (const cx of [-1.2, 1.2]) {
-    for (const cy of [1.28, 3.88]) {
-      for (const cz of [-5.84, 5.84]) {
-        const corner = new THREE.Mesh(cornerGeo, cabTrimGoldMat);
-        corner.position.set(cx, cy, cz);
-        trailerRoot.add(corner);
+    // Front & Rear Hemispherical Tank End Caps
+    for (const endZ of [-5.7, 5.7]) {
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(1.18, 24, 16), tankBarrelMat);
+      cap.scale.set(1.06, 0.92, 0.35);
+      cap.position.set(0, 2.38, endZ);
+      trailerRoot.add(cap);
+    }
+
+    // 5 Structural Circumferential Reinforcing Rings + Top Inspection Manway Domes
+    const ringMat = new THREE.MeshStandardMaterial({
+      color: 0x1d4ed8,
+      metalness: 0.55,
+      roughness: 0.3,
+    });
+    for (const rz of [-4.4, -2.2, 0, 2.2, 4.4]) {
+      const ring = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.22, 1.22, 0.18, 28).rotateX(Math.PI / 2),
+        ringMat
+      );
+      ring.scale.set(1.06, 0.92, 1);
+      ring.position.set(0, 2.38, rz);
+      trailerRoot.add(ring);
+
+      const dome = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.32, 0.22, 16), chromeMat);
+      dome.position.set(0, 3.52, rz);
+      trailerRoot.add(dome);
+    }
+
+    // Hazmat Orange & Red Warning Stripe along Tanker Flanks
+    const hazmatStripe = new THREE.Mesh(
+      new THREE.BoxGeometry(2.58, 0.24, 10.8),
+      new THREE.MeshBasicMaterial({ color: 0xea580c })
+    );
+    hazmatStripe.position.set(0, 2.38, 0);
+    trailerRoot.add(hazmatStripe);
+
+    // Top Catwalk Walkway & Rear Access Ladder
+    const topCatwalk = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.05, 10.6), brushedAlumMat);
+    topCatwalk.position.set(0.45, 3.55, 0);
+    trailerRoot.add(topCatwalk);
+  } else {
+    // 1. Default Tata Prima 4928.S Variant: 40ft Corrugated ISO Shipping Container
+    const containerBox = new THREE.Mesh(new THREE.BoxGeometry(2.5, 2.72, 11.8), [
+      containerSideMat,
+      containerSideMat,
+      containerEndMat,
+      chassisSteelMat,
+      containerRearDoorMat,
+      containerEndMat,
+    ]);
+    containerBox.position.set(0, 2.58, 0);
+    containerBox.castShadow = !isSoftwareGl;
+    containerBox.receiveShadow = !isSoftwareGl;
+    trailerRoot.add(containerBox);
+
+    const cornerGeo = new THREE.BoxGeometry(0.18, 0.18, 0.18);
+    for (const cx of [-1.2, 1.2]) {
+      for (const cy of [1.28, 3.88]) {
+        for (const cz of [-5.84, 5.84]) {
+          const corner = new THREE.Mesh(cornerGeo, cabTrimGoldMat);
+          corner.position.set(cx, cy, cz);
+          trailerRoot.add(corner);
+        }
       }
     }
+  }
+
+  // Hide articulated trailer on rigid 10-wheeler Ashok Leyland 3520 Goods Carrier
+  if (truckModelId === 'ashok_leyland_3520') {
+    trailerRoot.visible = false;
+    redSuzie.visible = false;
+    yellowSuzie.visible = false;
+    fifthWheelBase.visible = false;
+    fifthWheelPlate.visible = false;
   }
 
   const trailerChassis = new THREE.Mesh(
@@ -1305,10 +1624,14 @@ export function buildPlayerTruckAndTrailer(
   }
 
   return {
+    truckModelId,
     tractorRoot,
     cabinSuspensionGroup,
     trailerRoot,
     steeringWheelGroup,
+    shifterPivotGroup,
+    indicatorStalkPivot,
+    garlandGroup,
     rpmNeedle,
     speedNeedle,
     frontLeftSteerPivot,
@@ -1332,8 +1655,8 @@ export function buildPlayerTruckAndTrailer(
 }
 
 /**
- * Synchronizes the 3D Tractor, Cabin Suspension, Steering Wheel, Instrument Dials, Lights,
- * Spinning Cooling Fan, Exhaust Smoke Plume, and Articulated Trailer meshes with `TruckPhysicsState`.
+ * Synchronizes the 3D Tractor, Cabin Suspension, Steering Wheel, Interactive Gear Lever & Indicator Stalk,
+ * Instrument Dials, Lights, Spinning Cooling Fan, Exhaust Smoke Plume, and Articulated Trailer meshes.
  */
 export function syncPlayerRigMeshes(
   meshes: PlayerRigMeshes,
@@ -1344,13 +1667,26 @@ export function syncPlayerRigMeshes(
   meshes.tractorRoot.position.set(state.x, state.y, state.z);
   meshes.tractorRoot.rotation.set(0, -state.heading, 0, 'YXZ');
 
-  meshes.cabinSuspensionGroup.rotation.set(state.pitch, 0, -state.roll, 'YXZ');
+  // Visible Cab Suspension Pitch, Roll & Vertical Bounce (R4 & R5)
+  const avgFrontCompression =
+    ((state.wheels[0]?.compression ?? 0.4) + (state.wheels[1]?.compression ?? 0.4)) * 0.5;
+  meshes.cabinSuspensionGroup.position.y = (avgFrontCompression - 0.4) * 0.16;
+  meshes.cabinSuspensionGroup.rotation.set(state.pitch * 1.35, 0, -state.roll * 1.35, 'YXZ');
 
-  meshes.frontLeftSteerPivot.rotation.y = -state.steerAngleRad;
-  meshes.frontRightSteerPivot.rotation.y = -state.steerAngleRad;
+  // Front wheel steering + vertical suspension travel on all 6 tractor wheels (R5)
+  meshes.frontLeftSteerPivot.rotation.y = -state.steerAngleRad * 1.15;
+  meshes.frontRightSteerPivot.rotation.y = -state.steerAngleRad * 1.15;
+  meshes.frontLeftSteerPivot.position.y =
+    0.54 + ((state.wheels[0]?.compression ?? 0.4) - 0.4) * 0.18;
+  meshes.frontRightSteerPivot.position.y =
+    0.54 + ((state.wheels[1]?.compression ?? 0.4) - 0.4) * 0.18;
 
-  for (const w of meshes.tractorWheelMeshes) {
+  for (let i = 0; i < meshes.tractorWheelMeshes.length; i++) {
+    const w = meshes.tractorWheelMeshes[i];
     w.rotation.x = -state.wheelRotationRad;
+    if (i >= 2 && state.wheels[i]) {
+      w.position.y = 0.54 + (state.wheels[i].compression - 0.4) * 0.18;
+    }
   }
   for (const w of meshes.trailerWheelMeshes) {
     w.rotation.x = -state.wheelRotationRad;
@@ -1375,7 +1711,27 @@ export function syncPlayerRigMeshes(
     (puff.material as THREE.MeshBasicMaterial).opacity = (1 - t) * 0.24 * loadFactor;
   }
 
+  // Interactive Cabin Detailing (R6):
+  // 1. Steering Wheel turns with steering input
   meshes.steeringWheelGroup.rotation.z = state.steerAngleRad * 6.5;
+
+  // 2. Gear Shifter Lever physically moves fore/aft and left/right with gear changes
+  const gearGateCol = (state.gearIndex % 3) - 1; // -1, 0, +1
+  const gearGateRow = state.gearIndex === 2 ? 0 : state.gearIndex % 2 === 1 ? -1 : 1;
+  meshes.shifterPivotGroup.rotation.x +=
+    (gearGateRow * 0.22 - meshes.shifterPivotGroup.rotation.x) * 0.25;
+  meshes.shifterPivotGroup.rotation.z +=
+    (-0.12 + gearGateCol * 0.14 - meshes.shifterPivotGroup.rotation.z) * 0.25;
+
+  // 3. Indicator Stalk tilts with turn signal state
+  const targetStalkAngle =
+    state.indicator === 'left' ? 0.28 : state.indicator === 'right' ? -0.28 : 0;
+  meshes.indicatorStalkPivot.rotation.z +=
+    (targetStalkAngle - meshes.indicatorStalkPivot.rotation.z) * 0.3;
+
+  // 4. Windshield marigold garland & brass bell sway gently with lateral roll and pitch
+  meshes.garlandGroup.rotation.z = state.roll * 1.8;
+  meshes.garlandGroup.rotation.x = -state.pitch * 1.4;
 
   const rpmFrac = Math.max(0, Math.min(1, state.rpm / 2500));
   meshes.rpmNeedle.rotation.z = (0.5 - rpmFrac) * Math.PI * 1.35;
@@ -1400,6 +1756,7 @@ export function syncPlayerRigMeshes(
   meshes.indicatorLeftMat.emissiveIntensity = leftOn ? 2.6 : 0;
   meshes.indicatorRightMat.emissiveIntensity = rightOn ? 2.6 : 0;
 
+  meshes.trailerRoot.visible = meshes.truckModelId !== 'ashok_leyland_3520';
   meshes.trailerRoot.position.set(state.trailerX, state.trailerY, state.trailerZ);
   meshes.trailerRoot.rotation.set(
     state.trailerPitch,
