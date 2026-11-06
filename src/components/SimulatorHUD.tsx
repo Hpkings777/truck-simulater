@@ -35,6 +35,8 @@ interface SimulatorHUDProps {
   isMuted: boolean;
   hudCollapsed: boolean;
   isTouchDevice: boolean;
+  isFullscreen: boolean;
+  isPortraitMobile: boolean;
   gamepadConnected: boolean;
   geospatialStatus: GeospatialStatus;
   outcomeSnapshot: RunOutcomeSnapshot | null;
@@ -49,6 +51,7 @@ interface SimulatorHUDProps {
   onCycleTimeOfDay: (preset?: TimeOfDayPreset) => void;
   onToggleGraphicsQuality: (preset?: GraphicsQuality) => void;
   onToggleMute: () => void;
+  onToggleFullscreen: () => void;
   onToggleHeadlights: () => void;
   onToggleIndicator: (target: IndicatorState) => void;
   onToggleTransmission: (mode?: TransmissionMode) => void;
@@ -77,10 +80,11 @@ const HudMedallionButton: React.FC<{
   active?: boolean;
   accentColor?: 'amber' | 'emerald' | 'sky';
   size?: 'sm' | 'md' | 'lg';
+  keyHint?: string;
   onClick?: (e: React.MouseEvent<HTMLButtonElement>) => void;
-  onPointerDown?: () => void;
-  onPointerUp?: () => void;
-  onPointerLeave?: () => void;
+  onPointerDown?: (e: React.PointerEvent<HTMLButtonElement>) => void;
+  onPointerUp?: (e: React.PointerEvent<HTMLButtonElement>) => void;
+  onPointerLeave?: (e: React.PointerEvent<HTMLButtonElement>) => void;
   children: React.ReactNode;
 }> = ({
   testId,
@@ -89,6 +93,7 @@ const HudMedallionButton: React.FC<{
   active = false,
   accentColor = 'amber',
   size = 'md',
+  keyHint,
   onClick,
   onPointerDown,
   onPointerUp,
@@ -97,10 +102,10 @@ const HudMedallionButton: React.FC<{
 }) => {
   const dims =
     size === 'lg'
-      ? 'w-14 h-14'
+      ? 'w-13 h-13 sm:w-14 sm:h-14'
       : size === 'sm'
-        ? 'w-10 h-10'
-        : 'w-13 h-13';
+        ? 'w-10 h-10 sm:w-10.5 sm:h-10.5'
+        : 'w-11 h-11 sm:w-12 sm:h-12';
 
   const glowRingColor =
     accentColor === 'emerald'
@@ -124,11 +129,23 @@ const HudMedallionButton: React.FC<{
       data-testid={testId}
       aria-label={ariaLabel}
       title={title}
-      onClick={onClick}
-      onPointerDown={onPointerDown}
-      onPointerUp={onPointerUp}
-      onPointerLeave={onPointerLeave}
-      className={`${dims} relative rounded-full p-0 bg-transparent border-0 cursor-pointer select-none transition-transform duration-100 hover:scale-105 active:scale-95 focus:outline-none group`}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick?.(e);
+      }}
+      onPointerDown={(e) => {
+        e.stopPropagation();
+        onPointerDown?.(e);
+      }}
+      onPointerUp={(e) => {
+        e.stopPropagation();
+        onPointerUp?.(e);
+      }}
+      onPointerLeave={(e) => {
+        e.stopPropagation();
+        onPointerLeave?.(e);
+      }}
+      className={`${dims} relative rounded-full p-0 bg-transparent border-0 cursor-pointer select-none transition-transform duration-100 hover:scale-105 active:scale-95 focus:outline-none group shrink-0`}
     >
       <svg viewBox="0 0 64 64" className="w-full h-full overflow-visible drop-shadow-xl">
         {/* Outer Machined Bezel Ring */}
@@ -171,6 +188,33 @@ const HudMedallionButton: React.FC<{
         <g className={active ? 'text-amber-400' : 'text-stone-300 group-hover:text-amber-300'}>
           {children}
         </g>
+
+        {/* Optional Engraved Keycap Micro-Badge at bottom of bezel */}
+        {keyHint && (
+          <g transform="translate(32, 56)">
+            <rect
+              x="-8"
+              y="-5.5"
+              width="16"
+              height="10"
+              rx="3"
+              fill="#0c0a09"
+              stroke={active ? '#f59e0b' : '#44403c'}
+              strokeWidth="1.2"
+            />
+            <text
+              x="0"
+              y="1.8"
+              textAnchor="middle"
+              fill={active ? '#fbbf24' : '#a8a29e'}
+              fontFamily="JetBrains Mono, monospace"
+              fontWeight="700"
+              fontSize="7"
+            >
+              {keyHint}
+            </text>
+          </g>
+        )}
       </svg>
     </button>
   );
@@ -187,6 +231,8 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
   isMuted,
   hudCollapsed,
   isTouchDevice,
+  isFullscreen,
+  isPortraitMobile,
   gamepadConnected,
   geospatialStatus,
   outcomeSnapshot,
@@ -201,6 +247,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
   onCycleTimeOfDay,
   onToggleGraphicsQuality,
   onToggleMute,
+  onToggleFullscreen,
   onToggleHeadlights,
   onToggleIndicator,
   onToggleTransmission,
@@ -210,6 +257,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
   onTouchControl,
 }) => {
   const blurAndCall = (fn: () => void) => (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
     e.currentTarget.blur();
     fn();
   };
@@ -222,13 +270,28 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
   // ============================================================================
   if (gameState === 'title') {
     return (
-      <div className="fixed inset-0 z-20 pointer-events-none flex flex-col justify-between p-4 md:p-8 overflow-y-auto">
-        <div className="max-w-xl pointer-events-auto bg-stone-950/90 border border-stone-800/95 rounded-2xl p-5 md:p-6 shadow-2xl">
-          {/* Bespoke Inline SVG Title Emblem */}
-          <div className="mb-4">
+      <div className="fixed inset-0 z-20 pointer-events-none flex flex-col justify-between p-3 sm:p-6 md:p-8 overflow-y-auto">
+        {/* Portrait Mobile/Tablet Landscape Prompt */}
+        {isPortraitMobile && (
+          <button
+            type="button"
+            onClick={blurAndCall(onToggleFullscreen)}
+            className="pointer-events-auto self-center mb-2 px-4 py-2 rounded-full bg-amber-500 text-stone-950 font-display font-bold text-xs tracking-wider shadow-xl flex items-center gap-2 cursor-pointer"
+          >
+            <svg viewBox="0 0 24 24" className="w-4 h-4 fill-none stroke-stone-950 stroke-2">
+              <rect x="2" y="6" width="20" height="12" rx="2" />
+              <path d="M7 9l-2 3 2 3M17 9l2 3-2 3" />
+            </svg>
+            <span>TAP FOR FULLSCREEN LANDSCAPE MODE</span>
+          </button>
+        )}
+
+        <div className="w-full max-w-[600px] pointer-events-auto bg-stone-950/92 border border-stone-800/95 rounded-2xl p-4 sm:p-6 shadow-2xl">
+          {/* Header Row: Bespoke Inline SVG Title Emblem + Fullscreen/Landscape Quick Action */}
+          <div className="flex items-start justify-between gap-3 mb-4">
             <svg
-              viewBox="0 0 540 112"
-              className="w-full max-w-[460px] h-auto"
+              viewBox="0 0 640 112"
+              className="w-full max-w-[505px] h-auto"
               role="img"
               aria-label="Indian National Highway Heavy Haul 3D Simulator"
             >
@@ -289,35 +352,64 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
               </text>
               <text
                 x="110"
-                y="76"
+                y="75"
                 fill="#fbbf24"
                 fontFamily="Chakra Petch, sans-serif"
                 fontWeight="600"
-                fontSize="19"
-                letterSpacing="2.2"
+                fontSize="18.5"
+                letterSpacing="2"
               >
                 INDIAN HIGHWAY 3D SIMULATOR
               </text>
               <line
                 x1="110"
-                y1="89"
-                x2="532"
-                y2="89"
+                y1="88"
+                x2="632"
+                y2="88"
                 stroke="#44403c"
                 strokeWidth="2"
               />
               <text
                 x="110"
-                y="106"
-                fill="#a8a29e"
+                y="105"
+                fill="#d6d3d1"
                 fontFamily="JetBrains Mono, monospace"
                 fontWeight="600"
-                fontSize="11"
-                letterSpacing="0.3"
+                fontSize="11.5"
+                letterSpacing="0.4"
               >
                 {activeMapSpec.subtitle.toUpperCase()}
               </text>
             </svg>
+
+            <HudMedallionButton
+              testId="title-fullscreen-btn"
+              ariaLabel={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen & Landscape'}
+              title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen & Landscape Mode'}
+              active={isFullscreen}
+              size="sm"
+              onClick={blurAndCall(onToggleFullscreen)}
+            >
+              {isFullscreen ? (
+                <path
+                  d="M24 16v8h-8M40 16v8h8M24 48v-8h-8M40 48v-8h8"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              ) : (
+                <path
+                  d="M18 26v-8h8M46 26v-8h-8M18 38v8h8M46 38v8h-8"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              )}
+            </HudMedallionButton>
           </div>
 
           {/* Pre-Drive Selectors: 3 Trucks, 3 Maps, Graphics & Atmosphere */}
@@ -325,9 +417,9 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
             {/* R7: 3 Visibly Distinct Indian Heavy Trucks */}
             <div>
               <div className="flex items-center justify-between text-xs font-semibold text-stone-300 mb-1.5">
-                <span>1. Select Heavy Truck Rig (3 Distinct 3D Chassis)</span>
+                <span>1. Heavy Truck Chassis (3 Distinct 3D Rigs)</span>
                 <span className="text-[11px] font-mono-tabular text-amber-400">
-                  {activeTruckSpec.grossWeightTonnes}t · {activeTruckSpec.peakTorqueNm} Nm
+                  {activeTruckSpec.name} · {activeTruckSpec.grossWeightTonnes}t
                 </span>
               </div>
               <div className="grid grid-cols-3 gap-2">
@@ -339,19 +431,19 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
                       key={tId}
                       type="button"
                       data-testid={`truck-btn-${tId}`}
-                      onClick={() => onSelectTruck(tId)}
+                      onClick={blurAndCall(() => onSelectTruck(tId))}
                       className={`p-2.5 rounded-xl text-left border transition-all cursor-pointer ${
                         active
                           ? 'bg-amber-500/20 border-amber-400 text-stone-100 shadow-md'
                           : 'bg-stone-900/90 hover:bg-stone-800 border-stone-800 text-stone-300'
                       }`}
                     >
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs font-bold leading-tight truncate text-amber-400">
+                      <div className="flex items-center justify-between gap-1 mb-1">
+                        <span className="text-[11.5px] font-bold leading-tight text-amber-400">
                           {spec.shortName}
                         </span>
                         {/* Custom Truck Silhouette SVG */}
-                        <svg viewBox="0 0 36 18" className="w-6 h-3.5 shrink-0 fill-current text-amber-400/80">
+                        <svg viewBox="0 0 36 18" className="w-6 h-3.5 shrink-0 fill-current text-amber-400/85">
                           {tId === 'tata_prima_4928' ? (
                             <path d="M2 5h18v8H2V5zm19 2h8l3 3v3h-11V7zM7 15a2 2 0 100-4 2 2 0 000 4zm9 0a2 2 0 100-4 2 2 0 000 4zm11 0a2 2 0 100-4 2 2 0 000 4z" />
                           ) : tId === 'ashok_leyland_3520' ? (
@@ -361,7 +453,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
                           )}
                         </svg>
                       </div>
-                      <div className="text-[10px] text-stone-300 truncate">
+                      <div className="text-[10px] text-stone-300 leading-snug">
                         {spec.category}
                       </div>
                       <div className="text-[10px] font-mono-tabular text-stone-400 mt-1">
@@ -376,7 +468,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
             {/* R8 & R9: 3 Genuinely Different Indian Highway Maps */}
             <div>
               <div className="flex items-center justify-between text-xs font-semibold text-stone-300 mb-1.5">
-                <span>2. Select Photorealistic 3D Highway Map</span>
+                <span>2. Photorealistic 3D Highway Corridor</span>
                 <span className="text-[11px] font-mono-tabular text-emerald-400">
                   {activeMapSpec.routeCode} · {activeMapSpec.regionBadge}
                 </span>
@@ -390,15 +482,15 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
                       key={mId}
                       type="button"
                       data-testid={`map-btn-${mId}`}
-                      onClick={() => onSelectMap(mId)}
+                      onClick={blurAndCall(() => onSelectMap(mId))}
                       className={`p-2.5 rounded-xl text-left border transition-all cursor-pointer ${
                         active
                           ? 'bg-emerald-500/20 border-emerald-400 text-stone-100 shadow-md'
                           : 'bg-stone-900/90 hover:bg-stone-800 border-stone-800 text-stone-300'
                       }`}
                     >
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs font-bold leading-tight truncate text-emerald-400">
+                      <div className="flex items-center justify-between gap-1 mb-1">
+                        <span className="text-[11.5px] font-bold leading-tight text-emerald-400">
                           {mSpec.shortTitle}
                         </span>
                         {/* Custom Terrain Emblem SVG */}
@@ -412,10 +504,10 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
                           )}
                         </svg>
                       </div>
-                      <div className="text-[10px] text-stone-300 truncate">
+                      <div className="text-[10px] text-stone-300 leading-snug">
                         {mSpec.regionBadge}
                       </div>
-                      <div className="text-[10px] font-mono-tabular text-stone-400 mt-1 truncate">
+                      <div className="text-[10px] font-mono-tabular text-stone-400 mt-1">
                         {mSpec.routeCode} · 5.0 KM
                       </div>
                     </button>
@@ -428,7 +520,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <div>
                 <div className="text-[11px] font-semibold text-stone-400 mb-1">
-                  Atmosphere
+                  Atmosphere & Sun Angle
                 </div>
                 <div className="grid grid-cols-3 gap-1.5">
                   {(
@@ -441,7 +533,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
                     <button
                       key={preset.id}
                       type="button"
-                      onClick={() => onCycleTimeOfDay(preset.id)}
+                      onClick={blurAndCall(() => onCycleTimeOfDay(preset.id))}
                       className={`py-1.5 px-2 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
                         timeOfDay === preset.id
                           ? 'bg-amber-500 text-stone-950'
@@ -471,7 +563,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
                       key={tier.id}
                       type="button"
                       data-testid={`gfx-btn-${tier.id}`}
-                      onClick={() => onToggleGraphicsQuality(tier.id)}
+                      onClick={blurAndCall(() => onToggleGraphicsQuality(tier.id))}
                       className={`py-1.5 px-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
                         graphicsQuality === tier.id
                           ? 'bg-amber-500 text-stone-950'
@@ -490,7 +582,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
           <button
             type="button"
             data-start="true"
-            onClick={onStartGame}
+            onClick={blurAndCall(onStartGame)}
             className="w-full py-3.5 px-6 bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-stone-950 font-display font-bold text-lg tracking-wider rounded-xl shadow-lg transition-all cursor-pointer flex items-center justify-center gap-3"
           >
             <svg viewBox="0 0 28 28" className="w-6 h-6 fill-none stroke-stone-950 stroke-[2.4]">
@@ -513,7 +605,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
         {/* Single Flat Control-Hint Line in Bottom Safe Margin */}
         <div className="w-full flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-stone-300 hud-stroke px-2 mt-3">
           <span>
-            WASD / Arrows / Gamepad Drive · Space Air Brake · C Camera · L Lights · Q/E Indicators · H Horn · Esc Garage
+            WASD / Arrows Drive · Space Air Brake · C Camera · L Lights · Q/E Turn Signals · G Auto/Man · H Horn · Esc Garage
           </span>
           <span className="text-stone-400 text-[11px]">
             {geospatialStatus.dataAttribution}
@@ -525,10 +617,8 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
 
   // ============================================================================
   // 2. PLAYING HUD — CUSTOM GRAPHICAL GAME INSTRUMENT PODS & MEDALLIONS
-  //    (Zero rectangular text-and-box buttons!)
   // ============================================================================
   const rpmRatio = Math.min(1, Math.max(0, telemetry.rpm / 2500));
-  // Analog tachometer needle angle: sweeps from -130 deg (idle 0 RPM) to +130 deg (2500 RPM)
   const rpmNeedleAngleDeg = -130 + rpmRatio * 260;
   const fuelRatio = Math.min(1, Math.max(0, telemetry.fuelLiters / telemetry.fuelMaxLiters));
   const cargoRatio = Math.min(1, Math.max(0, telemetry.cargoIntegrityPct / 100));
@@ -542,116 +632,236 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
     (telemetry.indicator === 'right' || telemetry.indicator === 'hazard');
 
   return (
-    <div className="fixed inset-0 z-20 pointer-events-none flex flex-col justify-between p-3 md:p-5 select-none">
-      {/* TOP PERIMETER: Custom SVG Indian Milestone Arch Emblem (Left) + Sculpted Gear Cog Medallion (Right) */}
-      <div className="flex items-start justify-between gap-3">
-        {/* Top-Left: Custom Graphical NHAI Highway Milestone & Route Arch Badge */}
-        <div className="pointer-events-auto relative drop-shadow-2xl">
-          <svg
-            viewBox="0 0 320 76"
-            className="w-[270px] sm:w-[310px] h-auto overflow-visible"
-            role="img"
-            aria-label="Highway Milestone and Waypoint Gauge"
+    <div className="fixed inset-0 z-20 pointer-events-none flex flex-col justify-between p-2.5 sm:p-4 md:p-5 select-none">
+      {/* TOP PERIMETER WRAPPER (keeps portrait banner + top bar pinned at the top edge) */}
+      <div className="flex flex-col gap-1.5 w-full">
+        {/* Portrait Mobile/Tablet One-Tap Landscape Fullscreen Banner */}
+        {isPortraitMobile && gameState === 'playing' && (
+          <button
+            type="button"
+            onClick={blurAndCall(onToggleFullscreen)}
+            className="pointer-events-auto self-center px-3.5 py-1.5 rounded-full bg-amber-500 text-stone-950 font-display font-bold text-[11px] tracking-wider shadow-xl flex items-center gap-2 cursor-pointer"
           >
-            {/* Outer Sculpted Highway Milestone Shield */}
-            <path
-              d="M14 4 H296 L314 22 V56 L298 72 H14 C7 72 4 66 4 58 V18 C4 10 7 4 14 4 Z"
-              fill="#0c0a09"
-              fillOpacity="0.9"
-              stroke="#44403c"
-              strokeWidth="2"
-            />
-            {/* Yellow NHAI Milestone Top Crown Accent */}
-            <path
-              d="M14 4 H296 L306 14 H6 L14 4 Z"
-              fill="#f59e0b"
-            />
-            {/* Route Progress Glow Track along bottom edge */}
-            <line
-              x1="16"
-              y1="67"
-              x2="294"
-              y2="67"
-              stroke="#292524"
-              strokeWidth="4"
-              strokeLinecap="round"
-            />
-            <line
-              x1="16"
-              y1="67"
-              x2={16 + 278 * routeProgressRatio}
-              y2="67"
-              stroke="#10b981"
-              strokeWidth="4"
-              strokeLinecap="round"
-            />
+            <svg viewBox="0 0 24 24" className="w-4 h-4 fill-none stroke-stone-950 stroke-2">
+              <rect x="2" y="6" width="20" height="12" rx="2" />
+              <path d="M7 9l-2 3 2 3M17 9l2 3-2 3" />
+            </svg>
+            <span>TAP FOR LANDSCAPE FULLSCREEN</span>
+          </button>
+        )}
 
-            {/* Indian Circular Speed Limit Sign Roundel */}
-            <circle
-              cx="36"
-              cy="40"
-              r="19"
-              fill="#f5f5f4"
-              stroke="#dc2626"
-              strokeWidth="4.5"
-            />
-            <text
-              x="36"
-              y="45"
-              textAnchor="middle"
-              fill="#0c0a09"
-              fontFamily="JetBrains Mono, monospace"
-              fontWeight="800"
-              fontSize="15"
+        {/* TOP PERIMETER: Custom SVG Indian Milestone Arch Emblem (Left) + Utility & Settings Medallions (Right) */}
+        <div className="flex items-start justify-between gap-2 w-full">
+          {/* Top-Left: Sleek Cockpit Visor Strip in 1st-Person Cabin View OR Full NHAI Milestone Shield in Exterior Views */}
+          {cameraMode === 'cabin' ? (
+            <div className="pointer-events-auto relative drop-shadow-xl min-w-0">
+              <svg
+                viewBox="0 0 336 46"
+                className="w-[216px] sm:w-[324px] h-auto overflow-visible"
+                role="img"
+                aria-label="Cockpit Visor Telemetry Strip"
+              >
+              <path
+                d="M12 3 H320 L332 23 L320 43 H12 C6 43 3 38 3 31 V15 C3 8 6 3 12 3 Z"
+                fill="#0c0a09"
+                fillOpacity="0.88"
+                stroke="#f59e0b"
+                strokeWidth="1.6"
+              />
+              {/* Route Progress Micro-Track along lower visor edge */}
+              <line
+                x1="14"
+                y1="40"
+                x2="316"
+                y2="40"
+                stroke="#292524"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+              />
+              <line
+                x1="14"
+                y1="40"
+                x2={14 + 302 * routeProgressRatio}
+                y2="40"
+                stroke="#10b981"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+              />
+              <circle cx="24" cy="22" r="12" fill="#f5f5f4" stroke="#dc2626" strokeWidth="3.2" />
+              <text
+                x="24"
+                y="26"
+                textAnchor="middle"
+                fill="#0c0a09"
+                fontFamily="JetBrains Mono, monospace"
+                fontWeight="800"
+                fontSize="11"
+              >
+                {telemetry.speedLimitKmh}
+              </text>
+              <text
+                x="46"
+                y="17"
+                fill="#fbbf24"
+                fontFamily="JetBrains Mono, monospace"
+                fontWeight="700"
+                fontSize="9"
+              >
+                RHD COCKPIT · {telemetry.landmarkKm} · DRAG VIEW
+              </text>
+            </svg>
+            <div
+              data-testid="hud-zone-name"
+              className="absolute left-[46px] top-[18px] right-4 text-[11px] sm:text-xs font-bold text-stone-100 truncate pointer-events-none"
             >
-              {telemetry.speedLimitKmh}
-            </text>
-
-            {/* Route Code & Milestone Distance */}
-            <text
-              x="66"
-              y="28"
-              fill="#fbbf24"
-              fontFamily="JetBrains Mono, monospace"
-              fontWeight="700"
-              fontSize="10.5"
-            >
-              {telemetry.landmarkKm} · {activeTruckSpec.shortName.toUpperCase()}
-            </text>
-
-            {/* Next Waypoint Distance Meter */}
-            <text
-              x="66"
-              y="59"
-              fill="#a8a29e"
-              fontFamily="JetBrains Mono, monospace"
-              fontWeight="600"
-              fontSize="10"
-            >
-              ▸ {telemetry.nextWaypointName.toUpperCase()} ({telemetry.nextWaypointDistanceM}M)
-            </text>
-          </svg>
-
-          {/* Accessible DOM Zone Name overlaid cleanly inside the SVG Milestone Shield */}
-          <div
-            data-testid="hud-zone-name"
-            className="absolute left-[66px] top-[29px] right-4 text-xs sm:text-[13px] font-bold text-stone-100 truncate pointer-events-none"
-          >
-            {telemetry.zoneName}
+              {telemetry.zoneName}
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="pointer-events-auto relative drop-shadow-2xl min-w-0">
+            <svg
+              viewBox="0 0 356 78"
+              className="w-[220px] sm:w-[346px] h-auto overflow-visible"
+              role="img"
+              aria-label="Highway Milestone and Waypoint Gauge"
+            >
+              {/* Outer Sculpted Highway Milestone Shield */}
+              <path
+                d="M14 4 H332 L350 22 V58 L334 74 H14 C7 74 4 68 4 60 V18 C4 10 7 4 14 4 Z"
+                fill="#0c0a09"
+                fillOpacity="0.92"
+                stroke="#44403c"
+                strokeWidth="2"
+              />
+              {/* Yellow NHAI Milestone Top Crown Accent */}
+              <path d="M14 4 H332 L342 14 H6 L14 4 Z" fill="#f59e0b" />
+              {/* Route Progress Glow Track along bottom edge */}
+              <line
+                x1="16"
+                y1="69"
+                x2="330"
+                y2="69"
+                stroke="#292524"
+                strokeWidth="4"
+                strokeLinecap="round"
+              />
+              <line
+                x1="16"
+                y1="69"
+                x2={16 + 314 * routeProgressRatio}
+                y2="69"
+                stroke="#10b981"
+                strokeWidth="4"
+                strokeLinecap="round"
+              />
 
-        {/* Top-Right: Sculpted Circular Mechanical Gear Cog Medallion (No Rectangular Text Box!) */}
-        <div className="pointer-events-auto flex items-center gap-2.5">
+              {/* Indian Circular Speed Limit Sign Roundel */}
+              <circle
+                cx="36"
+                cy="41"
+                r="19"
+                fill="#f5f5f4"
+                stroke="#dc2626"
+                strokeWidth="4.5"
+              />
+              <text
+                x="36"
+                y="46"
+                textAnchor="middle"
+                fill="#0c0a09"
+                fontFamily="JetBrains Mono, monospace"
+                fontWeight="800"
+                fontSize="15"
+              >
+                {telemetry.speedLimitKmh}
+              </text>
+
+              {/* Route Code & Milestone Distance */}
+              <text
+                x="66"
+                y="28"
+                fill="#fbbf24"
+                fontFamily="JetBrains Mono, monospace"
+                fontWeight="700"
+                fontSize="10.5"
+              >
+                {telemetry.landmarkKm} · {activeTruckSpec.shortName.toUpperCase()}
+              </text>
+
+              {/* Next Waypoint Distance Meter */}
+              <text
+                x="66"
+                y="60"
+                fill="#a8a29e"
+                fontFamily="JetBrains Mono, monospace"
+                fontWeight="600"
+                fontSize="10"
+              >
+                ▸ {telemetry.nextWaypointName.toUpperCase()} ({telemetry.nextWaypointDistanceM}M)
+              </text>
+            </svg>
+
+            {/* Accessible DOM Zone Name overlaid cleanly inside the SVG Milestone Shield */}
+            <div
+              data-testid="hud-zone-name"
+              className="absolute left-[46px] sm:left-[66px] top-[20px] sm:top-[30px] right-3 text-[11px] sm:text-[13px] font-bold text-stone-100 truncate pointer-events-none"
+            >
+              {telemetry.zoneName}
+            </div>
+          </div>
+        )}
+
+        {/* Top-Right: Fullscreen/Landscape Medallion + HUD Toggle Medallion + Settings Gear Medallion */}
+        <div className="pointer-events-auto flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+          {/* Fullscreen & Landscape Lock Medallion */}
+          <HudMedallionButton
+            testId="fullscreen-btn"
+            ariaLabel={
+              isFullscreen
+                ? 'Exit Fullscreen Mode'
+                : 'Enter Fullscreen & Lock Landscape Orientation'
+            }
+            title={
+              isFullscreen
+                ? 'Exit Fullscreen'
+                : 'Fullscreen & Landscape Mode (Tablets / Mobile)'
+            }
+            active={isFullscreen}
+            size="sm"
+            onClick={blurAndCall(onToggleFullscreen)}
+          >
+            {isFullscreen ? (
+              <path
+                d="M24 16v8h-8M40 16v8h8M24 48v-8h-8M40 48v-8h8"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            ) : (
+              <path
+                d="M18 26v-8h8M46 26v-8h-8M18 38v8h8M46 38v8h-8"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            )}
+          </HudMedallionButton>
+
           {/* HUD Visibility Toggle Medallion */}
           <HudMedallionButton
-            ariaLabel={hudCollapsed ? 'Show Cockpit Instruments [U]' : 'Hide Cockpit Instruments [U]'}
+            ariaLabel={
+              hudCollapsed ? 'Show Cockpit Instruments [U]' : 'Hide Cockpit Instruments [U]'
+            }
             title={hudCollapsed ? 'Show Instruments [U]' : 'Hide Instruments [U]'}
             active={!hudCollapsed}
             size="sm"
+            keyHint="U"
             onClick={blurAndCall(onToggleHudCollapsed)}
           >
-            {/* Custom Eye / Visor Graphic */}
             <path
               d="M14 32 C20 21 44 21 50 32 C44 43 20 43 14 32 Z"
               fill="none"
@@ -671,9 +881,9 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
             title="Garage, Route & Graphics Settings [Esc]"
             active={gameState === 'paused'}
             size="lg"
+            keyHint="ESC"
             onClick={blurAndCall(gameState === 'paused' ? onResumeGame : onPauseGame)}
           >
-            {/* Custom Machined 8-Tooth Heavy Truck Transmission Gear Graphic */}
             <path
               d="M32 14 L35 18 L40 16 L41 21 L46 22 L44 27 L48 30 L45 34 L48 38 L43 40 L43 45 L38 45 L35 49 L32 45 L29 49 L26 45 L21 45 L21 40 L16 38 L19 34 L16 30 L20 27 L18 22 L23 21 L24 16 L29 18 Z"
               fill="none"
@@ -684,6 +894,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
             <circle cx="32" cy="32" r="7.5" fill="none" stroke="#f5f5f4" strokeWidth="2.5" />
             <circle cx="32" cy="32" r="2.8" fill="#fbbf24" />
           </HudMedallionButton>
+        </div>
         </div>
       </div>
 
@@ -759,9 +970,18 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
             <button
               type="button"
               aria-label="Air Brake Pedal"
-              onPointerDown={() => onTouchControl('brake', true)}
-              onPointerUp={() => onTouchControl('brake', false)}
-              onPointerLeave={() => onTouchControl('brake', false)}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onTouchControl('brake', true);
+              }}
+              onPointerUp={(e) => {
+                e.stopPropagation();
+                onTouchControl('brake', false);
+              }}
+              onPointerLeave={(e) => {
+                e.stopPropagation();
+                onTouchControl('brake', false);
+              }}
               className="w-16 h-20 bg-transparent border-0 p-0 cursor-pointer active:scale-95 transition-transform"
             >
               <svg viewBox="0 0 64 80" className="w-full h-full drop-shadow-xl">
@@ -784,9 +1004,18 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
             <button
               type="button"
               aria-label="Throttle Accelerator Pedal"
-              onPointerDown={() => onTouchControl('throttle', true)}
-              onPointerUp={() => onTouchControl('throttle', false)}
-              onPointerLeave={() => onTouchControl('throttle', false)}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onTouchControl('throttle', true);
+              }}
+              onPointerUp={(e) => {
+                e.stopPropagation();
+                onTouchControl('throttle', false);
+              }}
+              onPointerLeave={(e) => {
+                e.stopPropagation();
+                onTouchControl('throttle', false);
+              }}
               className="w-16 h-24 bg-transparent border-0 p-0 cursor-pointer active:scale-95 transition-transform"
             >
               <svg viewBox="0 0 64 96" className="w-full h-full drop-shadow-xl">
@@ -816,314 +1045,443 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
         </div>
       )}
 
-      {/* BOTTOM INSTRUMENT CLUSTER: Circular Cockpit Dial Pod (Left) + Graphical Action Medallions (Right) */}
+      {/* BOTTOM INSTRUMENT CLUSTER:
+          - In 1st-Person Cabin View: Speedometer, Tachometer, Digital DID & Radar live directly on the 3D Dashboard!
+            Bottom-left stays 100% open so the 3D Radar & Cockpit Console are unobstructed, while all tactile medallions
+            sit cleanly docked in a unified bottom-right control bar.
+          - In Chase / Orbit Views: Bottom-left displays the circular SVG Tachometer/Speedometer Pod with outer satellite medallions,
+            and Bottom-right displays Camera & Auxiliary medallions. */}
       {!hudCollapsed && (
-        <div className="flex items-end justify-between gap-4 w-full">
-          {/* Bottom-Left: Custom Circular SVG Analog/Digital Tachometer & Speedometer Pod */}
-          <div className="pointer-events-auto relative w-[224px] h-[196px] shrink-0 drop-shadow-2xl">
-            <svg
-              viewBox="0 0 240 210"
-              className="w-full h-full overflow-visible"
-              role="img"
-              aria-label={`Speed ${Math.round(telemetry.speedKmh)} km/h, Gear ${telemetry.gearLabel}, Engine ${Math.round(telemetry.rpm)} RPM`}
-            >
-              <defs>
-                <radialGradient id="dialFaceGrad" cx="50%" cy="50%" r="50%">
-                  <stop offset="0%" stopColor="#1c1917" />
-                  <stop offset="72%" stopColor="#0c0a09" />
-                  <stop offset="100%" stopColor="#050404" />
-                </radialGradient>
-              </defs>
+        <div
+          className={`flex items-end ${
+            cameraMode === 'cabin' ? 'justify-end' : 'justify-between'
+          } gap-4 w-full`}
+        >
+          {cameraMode !== 'cabin' && (
+            /* Bottom-Left (Exterior Chase / Orbit Views): Custom Circular SVG Analog/Digital Tachometer & Speedometer Pod */
+            <div className="pointer-events-auto relative w-[244px] h-[212px] shrink-0 drop-shadow-2xl">
+              <svg
+                viewBox="0 0 256 220"
+                className="w-full h-full overflow-visible"
+                role="img"
+                aria-label={`Speed ${Math.round(telemetry.speedKmh)} km/h, Gear ${telemetry.gearLabel}, Engine ${Math.round(telemetry.rpm)} RPM`}
+              >
+                <defs>
+                  <radialGradient id="dialFaceGrad" cx="50%" cy="50%" r="50%">
+                    <stop offset="0%" stopColor="#1c1917" />
+                    <stop offset="72%" stopColor="#0c0a09" />
+                    <stop offset="100%" stopColor="#050404" />
+                  </radialGradient>
+                </defs>
 
-              {/* Outer Brushed Gunmetal Instrument Housing */}
-              <circle
-                cx="120"
-                cy="108"
-                r="88"
-                fill="url(#dialFaceGrad)"
-                stroke="#44403c"
-                strokeWidth="4"
-              />
-              {/* Chrome Inner Bezel Ring */}
-              <circle
-                cx="120"
-                cy="108"
-                r="81"
-                fill="none"
-                stroke="#78716c"
-                strokeWidth="1.2"
-                strokeDasharray="6 3"
-              />
+                {/* Outer Brushed Gunmetal Instrument Housing */}
+                <circle
+                  cx="128"
+                  cy="112"
+                  r="88"
+                  fill="url(#dialFaceGrad)"
+                  stroke="#44403c"
+                  strokeWidth="4"
+                />
+                {/* Chrome Inner Bezel Ring */}
+                <circle
+                  cx="128"
+                  cy="112"
+                  r="81"
+                  fill="none"
+                  stroke="#78716c"
+                  strokeWidth="1.2"
+                  strokeDasharray="6 3"
+                />
 
-              {/* Radial RPM Scale Arc (-130 deg to +130 deg) */}
-              {/* Economy Diesel Green Band Arc */}
-              <path
-                d="M 55 78 A 72 72 0 0 1 185 78"
-                fill="none"
-                stroke="#10b981"
-                strokeOpacity="0.32"
-                strokeWidth="8"
-                strokeLinecap="round"
-              />
+                {/* Economy Diesel Green Band Arc */}
+                <path
+                  d="M 63 82 A 72 72 0 0 1 193 82"
+                  fill="none"
+                  stroke="#10b981"
+                  strokeOpacity="0.32"
+                  strokeWidth="8"
+                  strokeLinecap="round"
+                />
 
-              {/* Radial Tachometer Tick Marks around the Dial */}
-              {Array.from({ length: 26 }).map((_, idx) => {
-                const tickDeg = -130 + idx * 10;
-                const rad = ((tickDeg - 90) * Math.PI) / 180;
-                const isMajor = idx % 5 === 0;
-                const rOuter = 76;
-                const rInner = isMajor ? 64 : 69;
-                const x1 = 120 + Math.cos(rad) * rInner;
-                const y1 = 108 + Math.sin(rad) * rInner;
-                const x2 = 120 + Math.cos(rad) * rOuter;
-                const y2 = 108 + Math.sin(rad) * rOuter;
-                const tickColor =
-                  idx >= 21 ? '#ef4444' : idx >= 11 && idx <= 18 ? '#10b981' : '#a8a29e';
-                return (
+                {/* Radial Tachometer Tick Marks around the Dial */}
+                {Array.from({ length: 26 }).map((_, idx) => {
+                  const tickDeg = -130 + idx * 10;
+                  const rad = ((tickDeg - 90) * Math.PI) / 180;
+                  const isMajor = idx % 5 === 0;
+                  const rOuter = 76;
+                  const rInner = isMajor ? 64 : 69;
+                  const x1 = 128 + Math.cos(rad) * rInner;
+                  const y1 = 112 + Math.sin(rad) * rInner;
+                  const x2 = 128 + Math.cos(rad) * rOuter;
+                  const y2 = 112 + Math.sin(rad) * rOuter;
+                  const tickColor =
+                    idx >= 21 ? '#ef4444' : idx >= 11 && idx <= 18 ? '#10b981' : '#a8a29e';
+                  return (
+                    <line
+                      key={idx}
+                      x1={x1}
+                      y1={y1}
+                      x2={x2}
+                      y2={y2}
+                      stroke={tickColor}
+                      strokeWidth={isMajor ? '2.6' : '1.4'}
+                      strokeLinecap="round"
+                    />
+                  );
+                })}
+
+                {/* Sweeping Analog Tachometer Needle */}
+                <g transform={`translate(128, 112) rotate(${rpmNeedleAngleDeg})`}>
+                  <polygon points="-2.5,12 0,-70 2.5,12" fill="#f59e0b" />
+                  <circle cx="0" cy="0" r="8" fill="#292524" stroke="#f59e0b" strokeWidth="2" />
+                </g>
+
+                {/* Center Digital Cockpit Readout Window */}
+                <circle
+                  cx="128"
+                  cy="115"
+                  r="44"
+                  fill="#090807"
+                  stroke="#292524"
+                  strokeWidth="2.5"
+                />
+
+                {/* Hero Digital Speed Numeral */}
+                <text
+                  x="128"
+                  y="114"
+                  textAnchor="middle"
+                  fill="#f5f5f4"
+                  fontFamily="Chakra Petch, sans-serif"
+                  fontWeight="700"
+                  fontSize="36"
+                >
+                  {Math.round(telemetry.speedKmh)}
+                </text>
+                <text
+                  x="128"
+                  y="128"
+                  textAnchor="middle"
+                  fill="#a8a29e"
+                  fontFamily="JetBrains Mono, monospace"
+                  fontWeight="700"
+                  fontSize="8.5"
+                  letterSpacing="1.2"
+                >
+                  KM/H · {Math.round(telemetry.rpm)} RPM
+                </text>
+
+                {/* Lower Sub-Dial Status Pill: Fuel & Cargo Integrity Bars */}
+                <g transform="translate(90, 168)">
+                  <rect x="0" y="0" width="34" height="5" rx="2.5" fill="#1c1917" />
+                  <rect
+                    x="0"
+                    y="0"
+                    width={Math.max(3, 34 * fuelRatio)}
+                    height="5"
+                    rx="2.5"
+                    fill="#f59e0b"
+                  />
+                  <rect x="42" y="0" width="34" height="5" rx="2.5" fill="#1c1917" />
+                  <rect
+                    x="42"
+                    y="0"
+                    width={Math.max(3, 34 * cargoRatio)}
+                    height="5"
+                    rx="2.5"
+                    fill={telemetry.cargoIntegrityPct < 80 ? '#f59e0b' : '#10b981'}
+                  />
+                  <text
+                    x="17"
+                    y="14"
+                    textAnchor="middle"
+                    fill="#a8a29e"
+                    fontFamily="JetBrains Mono, monospace"
+                    fontSize="7.5"
+                    fontWeight="700"
+                  >
+                    FUEL {Math.round(fuelRatio * 100)}%
+                  </text>
+                  <text
+                    x="59"
+                    y="14"
+                    textAnchor="middle"
+                    fill="#a8a29e"
+                    fontFamily="JetBrains Mono, monospace"
+                    fontSize="7.5"
+                    fontWeight="700"
+                  >
+                    CARGO {Math.round(cargoRatio * 100)}%
+                  </text>
+                </g>
+              </svg>
+
+              {/* Satellite Turn-Signal Wing Medallions & Gear Shifter Roundels mounted cleanly on outer bezel */}
+              <button
+                type="button"
+                tabIndex={-1}
+                data-testid="ind-left-btn"
+                aria-label="Left Turn Indicator [Q]"
+                title="Left Turn Signal [Q]"
+                onClick={blurAndCall(() =>
+                  onToggleIndicator(telemetry.indicator === 'left' ? 'off' : 'left')
+                )}
+                className="absolute left-0.5 top-2 w-10.5 h-10.5 rounded-full bg-transparent border-0 p-0 cursor-pointer hover:scale-110 active:scale-95 transition-transform"
+              >
+                <svg viewBox="0 0 44 44" className="w-full h-full drop-shadow-lg">
+                  <circle
+                    cx="22"
+                    cy="22"
+                    r="19"
+                    fill={leftSignalOn ? '#f59e0b' : '#141210'}
+                    stroke={leftSignalOn ? '#fef08a' : '#44403c'}
+                    strokeWidth="2.2"
+                  />
+                  <path
+                    d="M25 13 L14 22 L25 31 M16 22 H31"
+                    fill="none"
+                    stroke={leftSignalOn ? '#0c0a09' : '#a8a29e'}
+                    strokeWidth="3"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+
+              <button
+                type="button"
+                tabIndex={-1}
+                data-testid="ind-right-btn"
+                aria-label="Right Turn Indicator [E]"
+                title="Right Turn Signal [E]"
+                onClick={blurAndCall(() =>
+                  onToggleIndicator(telemetry.indicator === 'right' ? 'off' : 'right')
+                )}
+                className="absolute right-0.5 top-2 w-10.5 h-10.5 rounded-full bg-transparent border-0 p-0 cursor-pointer hover:scale-110 active:scale-95 transition-transform"
+              >
+                <svg viewBox="0 0 44 44" className="w-full h-full drop-shadow-lg">
+                  <circle
+                    cx="22"
+                    cy="22"
+                    r="19"
+                    fill={rightSignalOn ? '#f59e0b' : '#141210'}
+                    stroke={rightSignalOn ? '#fef08a' : '#44403c'}
+                    strokeWidth="2.2"
+                  />
+                  <path
+                    d="M19 13 L30 22 L19 31 M28 22 H13"
+                    fill="none"
+                    stroke={rightSignalOn ? '#0c0a09' : '#a8a29e'}
+                    strokeWidth="3"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+
+              {/* Center Gear Selector Medallion (Click to toggle Auto/Manual) */}
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={blurAndCall(() => onToggleTransmission())}
+                title={`12-Speed Gearbox (${telemetry.transmissionMode.toUpperCase()}) — Click to toggle Auto/Manual [G]`}
+                className="absolute left-1/2 -translate-x-1/2 top-[124px] w-14 h-8.5 bg-transparent border-0 p-0 cursor-pointer hover:scale-105 transition-transform"
+              >
+                <svg viewBox="0 0 68 34" className="w-full h-full">
+                  <rect
+                    x="2"
+                    y="2"
+                    width="64"
+                    height="30"
+                    rx="15"
+                    fill="#1c1917"
+                    stroke="#f59e0b"
+                    strokeWidth="1.8"
+                  />
+                  <text
+                    x="34"
+                    y="22"
+                    textAnchor="middle"
+                    fill="#fbbf24"
+                    fontFamily="JetBrains Mono, monospace"
+                    fontWeight="800"
+                    fontSize="14"
+                  >
+                    {telemetry.gearLabel}·{telemetry.transmissionMode === 'auto' ? 'A' : 'M'}
+                  </text>
+                </svg>
+              </button>
+
+              {/* Gear Down Paddle Roundel (-) */}
+              <button
+                type="button"
+                tabIndex={-1}
+                aria-label="Shift Gear Down"
+                title="Shift Gear Down [Ctrl]"
+                onClick={blurAndCall(() => onShiftGear(-1))}
+                className="absolute left-2 bottom-2.5 w-9 h-9 rounded-full bg-transparent border-0 p-0 cursor-pointer hover:scale-110 active:scale-95 transition-transform"
+              >
+                <svg viewBox="0 0 36 36" className="w-full h-full drop-shadow-md">
+                  <circle cx="18" cy="18" r="16" fill="#141210" stroke="#57534e" strokeWidth="2" />
+                  <line x1="12" y1="18" x2="24" y2="18" stroke="#e7e5e4" strokeWidth="3" strokeLinecap="round" />
+                </svg>
+              </button>
+
+              {/* Gear Up Paddle Roundel (+) */}
+              <button
+                type="button"
+                tabIndex={-1}
+                aria-label="Shift Gear Up"
+                title="Shift Gear Up [Shift]"
+                onClick={blurAndCall(() => onShiftGear(1))}
+                className="absolute right-2 bottom-2.5 w-9 h-9 rounded-full bg-transparent border-0 p-0 cursor-pointer hover:scale-110 active:scale-95 transition-transform"
+              >
+                <svg viewBox="0 0 36 36" className="w-full h-full drop-shadow-md">
+                  <circle cx="18" cy="18" r="16" fill="#141210" stroke="#57534e" strokeWidth="2" />
+                  <path d="M12 18 H24 M18 12 V24" stroke="#e7e5e4" strokeWidth="3" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+          )}
+
+          {/* Bottom-Right: Unified Tactile Medallion Control Dock */}
+          <div
+            className="pointer-events-auto flex flex-wrap items-center justify-end gap-2 sm:gap-2.5 pb-0.5"
+            role="group"
+            aria-label={`Cockpit Controls — Speed ${Math.round(telemetry.speedKmh)} km/h, Gear ${telemetry.gearLabel}`}
+          >
+            {/* In 1st-Person Cabin View, include Turn Signals & Gearbox Shifter right alongside Camera/Horn medallions */}
+            {cameraMode === 'cabin' && (
+              <>
+                <HudMedallionButton
+                  testId="ind-left-btn"
+                  ariaLabel="Left Turn Indicator [Q]"
+                  title="Left Turn Signal [Q]"
+                  active={leftSignalOn}
+                  size="sm"
+                  keyHint="Q"
+                  onClick={blurAndCall(() =>
+                    onToggleIndicator(telemetry.indicator === 'left' ? 'off' : 'left')
+                  )}
+                >
+                  <path
+                    d="M36 18 L20 32 L36 46 M22 32 H46"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </HudMedallionButton>
+
+                <HudMedallionButton
+                  ariaLabel="Shift Gear Down"
+                  title="Shift Gear Down [Ctrl]"
+                  size="sm"
+                  keyHint="-"
+                  onClick={blurAndCall(() => onShiftGear(-1))}
+                >
                   <line
-                    key={idx}
-                    x1={x1}
-                    y1={y1}
-                    x2={x2}
-                    y2={y2}
-                    stroke={tickColor}
-                    strokeWidth={isMajor ? '2.6' : '1.4'}
+                    x1="20"
+                    y1="32"
+                    x2="44"
+                    y2="32"
+                    stroke="currentColor"
+                    strokeWidth="4.2"
                     strokeLinecap="round"
                   />
-                );
-              })}
+                </HudMedallionButton>
 
-              {/* Sweeping Analog Tachometer Needle */}
-              <g transform={`translate(120, 108) rotate(${rpmNeedleAngleDeg})`}>
-                <polygon points="-2.5,12 0,-70 2.5,12" fill="#f59e0b" />
-                <circle cx="0" cy="0" r="8" fill="#292524" stroke="#f59e0b" strokeWidth="2" />
-              </g>
-
-              {/* Center Digital Cockpit Readout Window */}
-              <circle
-                cx="120"
-                cy="112"
-                r="44"
-                fill="#090807"
-                stroke="#292524"
-                strokeWidth="2.5"
-              />
-
-              {/* Hero Digital Speed Numeral */}
-              <text
-                x="120"
-                y="112"
-                textAnchor="middle"
-                fill="#f5f5f4"
-                fontFamily="Chakra Petch, sans-serif"
-                fontWeight="700"
-                fontSize="36"
-              >
-                {Math.round(telemetry.speedKmh)}
-              </text>
-              <text
-                x="120"
-                y="126"
-                textAnchor="middle"
-                fill="#78716c"
-                fontFamily="JetBrains Mono, monospace"
-                fontWeight="700"
-                fontSize="8.5"
-                letterSpacing="1.5"
-              >
-                KM/H · {Math.round(telemetry.rpm)} RPM
-              </text>
-
-              {/* Lower Sub-Dial Status Pill: Fuel & Cargo Integrity Bars */}
-              <g transform="translate(82, 162)">
-                <rect x="0" y="0" width="34" height="5" rx="2.5" fill="#1c1917" />
-                <rect
-                  x="0"
-                  y="0"
-                  width={Math.max(3, 34 * fuelRatio)}
-                  height="5"
-                  rx="2.5"
-                  fill="#f59e0b"
-                />
-                <rect x="42" y="0" width="34" height="5" rx="2.5" fill="#1c1917" />
-                <rect
-                  x="42"
-                  y="0"
-                  width={Math.max(3, 34 * cargoRatio)}
-                  height="5"
-                  rx="2.5"
-                  fill={telemetry.cargoIntegrityPct < 80 ? '#f59e0b' : '#10b981'}
-                />
-                <text
-                  x="17"
-                  y="14"
-                  textAnchor="middle"
-                  fill="#a8a29e"
-                  fontFamily="JetBrains Mono, monospace"
-                  fontSize="7.5"
-                  fontWeight="700"
+                <HudMedallionButton
+                  ariaLabel={`Gear ${telemetry.gearLabel} (${telemetry.transmissionMode}) — Toggle Auto/Manual [G]`}
+                  title="Toggle Auto / Manual 12-Speed Splitter Gearbox [G]"
+                  active={telemetry.transmissionMode === 'manual'}
+                  size="md"
+                  keyHint="G"
+                  onClick={blurAndCall(() => onToggleTransmission())}
                 >
-                  FUEL {Math.round(fuelRatio * 100)}%
-                </text>
-                <text
-                  x="59"
-                  y="14"
-                  textAnchor="middle"
-                  fill="#a8a29e"
-                  fontFamily="JetBrains Mono, monospace"
-                  fontSize="7.5"
-                  fontWeight="700"
+                  <text
+                    x="32"
+                    y="30"
+                    textAnchor="middle"
+                    fill="#fbbf24"
+                    fontFamily="Chakra Petch, sans-serif"
+                    fontWeight="800"
+                    fontSize="15.5"
+                  >
+                    {telemetry.gearLabel}
+                  </text>
+                  <text
+                    x="32"
+                    y="43"
+                    textAnchor="middle"
+                    fill="#a8a29e"
+                    fontFamily="JetBrains Mono, monospace"
+                    fontWeight="700"
+                    fontSize="8"
+                  >
+                    {telemetry.transmissionMode === 'auto' ? 'AUTO' : 'MAN'}
+                  </text>
+                </HudMedallionButton>
+
+                <HudMedallionButton
+                  ariaLabel="Shift Gear Up"
+                  title="Shift Gear Up [Shift]"
+                  size="sm"
+                  keyHint="+"
+                  onClick={blurAndCall(() => onShiftGear(1))}
                 >
-                  CARGO {Math.round(cargoRatio * 100)}%
-                </text>
-              </g>
-            </svg>
+                  <path
+                    d="M20 32 H44 M32 20 V44"
+                    stroke="currentColor"
+                    strokeWidth="4.2"
+                    strokeLinecap="round"
+                  />
+                </HudMedallionButton>
 
-            {/* Interactive Turn-Signal Wing Medallions & Gear Shifter Roundels mounted on the Dial Pod */}
-            {/* Left Turn Signal Wing Button */}
-            <button
-              type="button"
-              tabIndex={-1}
-              data-testid="ind-left-btn"
-              aria-label="Left Turn Indicator [Q]"
-              title="Left Turn Signal [Q]"
-              onClick={blurAndCall(() =>
-                onToggleIndicator(telemetry.indicator === 'left' ? 'off' : 'left')
-              )}
-              className="absolute left-0 top-3 w-11 h-11 rounded-full bg-transparent border-0 p-0 cursor-pointer hover:scale-110 active:scale-95 transition-transform"
-            >
-              <svg viewBox="0 0 44 44" className="w-full h-full drop-shadow-lg">
-                <circle
-                  cx="22"
-                  cy="22"
-                  r="19"
-                  fill={leftSignalOn ? '#f59e0b' : '#141210'}
-                  stroke={leftSignalOn ? '#fef08a' : '#44403c'}
-                  strokeWidth="2.2"
-                />
-                <path
-                  d="M25 13 L14 22 L25 31 M16 22 H31"
-                  fill="none"
-                  stroke={leftSignalOn ? '#0c0a09' : '#a8a29e'}
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </button>
-
-            {/* Right Turn Signal Wing Button */}
-            <button
-              type="button"
-              tabIndex={-1}
-              data-testid="ind-right-btn"
-              aria-label="Right Turn Indicator [E]"
-              title="Right Turn Signal [E]"
-              onClick={blurAndCall(() =>
-                onToggleIndicator(telemetry.indicator === 'right' ? 'off' : 'right')
-              )}
-              className="absolute right-0 top-3 w-11 h-11 rounded-full bg-transparent border-0 p-0 cursor-pointer hover:scale-110 active:scale-95 transition-transform"
-            >
-              <svg viewBox="0 0 44 44" className="w-full h-full drop-shadow-lg">
-                <circle
-                  cx="22"
-                  cy="22"
-                  r="19"
-                  fill={rightSignalOn ? '#f59e0b' : '#141210'}
-                  stroke={rightSignalOn ? '#fef08a' : '#44403c'}
-                  strokeWidth="2.2"
-                />
-                <path
-                  d="M19 13 L30 22 L19 31 M28 22 H13"
-                  fill="none"
-                  stroke={rightSignalOn ? '#0c0a09' : '#a8a29e'}
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </button>
-
-            {/* Center Gear Selector Medallion (Click to toggle Auto/Manual) */}
-            <button
-              type="button"
-              tabIndex={-1}
-              onClick={blurAndCall(() => onToggleTransmission())}
-              title={`12-Speed Gearbox (${telemetry.transmissionMode.toUpperCase()}) — Click to toggle Auto/Manual`}
-              className="absolute left-1/2 -translate-x-1/2 top-[118px] w-14 h-9 bg-transparent border-0 p-0 cursor-pointer hover:scale-105 transition-transform"
-            >
-              <svg viewBox="0 0 68 34" className="w-full h-full">
-                <rect
-                  x="2"
-                  y="2"
-                  width="64"
-                  height="30"
-                  rx="15"
-                  fill="#1c1917"
-                  stroke="#f59e0b"
-                  strokeWidth="1.8"
-                />
-                <text
-                  x="34"
-                  y="22"
-                  textAnchor="middle"
-                  fill="#fbbf24"
-                  fontFamily="JetBrains Mono, monospace"
-                  fontWeight="800"
-                  fontSize="14"
+                <HudMedallionButton
+                  testId="ind-right-btn"
+                  ariaLabel="Right Turn Indicator [E]"
+                  title="Right Turn Signal [E]"
+                  active={rightSignalOn}
+                  size="sm"
+                  keyHint="E"
+                  onClick={blurAndCall(() =>
+                    onToggleIndicator(telemetry.indicator === 'right' ? 'off' : 'right')
+                  )}
                 >
-                  {telemetry.gearLabel}·{telemetry.transmissionMode === 'auto' ? 'A' : 'M'}
-                </text>
-              </svg>
-            </button>
+                  <path
+                    d="M28 18 L44 32 L28 46 M42 32 H18"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </HudMedallionButton>
 
-            {/* Gear Down Paddle Roundel (-) */}
-            <button
-              type="button"
-              tabIndex={-1}
-              aria-label="Shift Gear Down"
-              title="Shift Gear Down"
-              onClick={blurAndCall(() => onShiftGear(-1))}
-              className="absolute left-1.5 bottom-3 w-9 h-9 rounded-full bg-transparent border-0 p-0 cursor-pointer hover:scale-110 active:scale-95 transition-transform"
-            >
-              <svg viewBox="0 0 36 36" className="w-full h-full drop-shadow-md">
-                <circle cx="18" cy="18" r="16" fill="#141210" stroke="#57534e" strokeWidth="2" />
-                <line x1="12" y1="18" x2="24" y2="18" stroke="#e7e5e4" strokeWidth="3" strokeLinecap="round" />
-              </svg>
-            </button>
+                {/* Sculpted Vertical Divider */}
+                <svg viewBox="0 0 6 36" className="w-1.5 h-8 hidden sm:block">
+                  <line x1="3" y1="4" x2="3" y2="32" stroke="#44403c" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              </>
+            )}
 
-            {/* Gear Up Paddle Roundel (+) */}
-            <button
-              type="button"
-              tabIndex={-1}
-              aria-label="Shift Gear Up"
-              title="Shift Gear Up"
-              onClick={blurAndCall(() => onShiftGear(1))}
-              className="absolute right-1.5 bottom-3 w-9 h-9 rounded-full bg-transparent border-0 p-0 cursor-pointer hover:scale-110 active:scale-95 transition-transform"
-            >
-              <svg viewBox="0 0 36 36" className="w-full h-full drop-shadow-md">
-                <circle cx="18" cy="18" r="16" fill="#141210" stroke="#57534e" strokeWidth="2" />
-                <path d="M12 18 H24 M18 12 V24" stroke="#e7e5e4" strokeWidth="3" strokeLinecap="round" />
-              </svg>
-            </button>
-          </div>
-
-          {/* Bottom-Right: Custom Sculpted Graphical Game Action Medallions (Pure SVG Artwork, Zero Text Boxes!) */}
-          <div className="pointer-events-auto flex items-center gap-2.5 sm:gap-3 pb-1">
             {/* 1. Cabin 1st-Person Cockpit View Medallion */}
             <HudMedallionButton
               testId="cam-btn-cabin"
               ariaLabel="1st-Person Cabin Cockpit View [C]"
               title="1st-Person RHD Cabin Cockpit Camera [C]"
               active={cameraMode === 'cabin'}
+              keyHint="C"
               onClick={blurAndCall(() => onCycleCamera('cabin'))}
             >
-              {/* Custom 3-Spoke Heavy Truck Steering Wheel Artwork */}
-              <circle cx="32" cy="32" r="13.5" fill="none" stroke="currentColor" strokeWidth="3" />
-              <circle cx="32" cy="32" r="4" fill="currentColor" />
-              <line x1="19" y1="30" x2="28" y2="32" stroke="currentColor" strokeWidth="2.6" />
-              <line x1="45" y1="30" x2="36" y2="32" stroke="currentColor" strokeWidth="2.6" />
-              <line x1="32" y1="36" x2="32" y2="45" stroke="currentColor" strokeWidth="2.6" />
+              <circle cx="32" cy="31" r="13" fill="none" stroke="currentColor" strokeWidth="3" />
+              <circle cx="32" cy="31" r="4" fill="currentColor" />
+              <line x1="19" y1="29" x2="28" y2="31" stroke="currentColor" strokeWidth="2.6" />
+              <line x1="45" y1="29" x2="36" y2="31" stroke="currentColor" strokeWidth="2.6" />
+              <line x1="32" y1="35" x2="32" y2="44" stroke="currentColor" strokeWidth="2.6" />
             </HudMedallionButton>
 
             {/* 2. 3rd-Person Chase View Medallion */}
@@ -1134,12 +1492,11 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
               active={cameraMode === 'chase'}
               onClick={blurAndCall(() => onCycleCamera('chase'))}
             >
-              {/* Custom Heavy Truck Rear Perspective & Highway Lanes Artwork */}
-              <path d="M15 46 L23 34 M49 46 L41 34" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" />
-              <rect x="22" y="18" width="20" height="15" rx="2.5" fill="none" stroke="currentColor" strokeWidth="2.6" />
-              <rect x="25" y="21" width="14" height="6" rx="1" fill="currentColor" fillOpacity="0.35" />
-              <line x1="24" y1="33" x2="24" y2="38" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" />
-              <line x1="40" y1="33" x2="40" y2="38" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" />
+              <path d="M15 45 L23 33 M49 45 L41 33" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" />
+              <rect x="22" y="17" width="20" height="15" rx="2.5" fill="none" stroke="currentColor" strokeWidth="2.6" />
+              <rect x="25" y="20" width="14" height="6" rx="1" fill="currentColor" fillOpacity="0.35" />
+              <line x1="24" y1="32" x2="24" y2="37" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" />
+              <line x1="40" y1="32" x2="40" y2="37" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" />
             </HudMedallionButton>
 
             {/* 3. 360° Orbit Inspection Camera Medallion */}
@@ -1150,19 +1507,18 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
               active={cameraMode === 'orbit'}
               onClick={blurAndCall(() => onCycleCamera('orbit'))}
             >
-              {/* Custom 360° Orbital Gyro Ring & Truck Core Artwork */}
               <ellipse
                 cx="32"
-                cy="32"
+                cy="31"
                 rx="16"
                 ry="8"
-                transform="rotate(-22 32 32)"
+                transform="rotate(-22 32 31)"
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="2.5"
               />
-              <circle cx="32" cy="32" r="4.5" fill="#fbbf24" />
-              <polygon points="45,22 49,27 42,28" fill="currentColor" />
+              <circle cx="32" cy="31" r="4.5" fill="#fbbf24" />
+              <polygon points="45,21 49,26 42,27" fill="currentColor" />
             </HudMedallionButton>
 
             {/* 4. Parabolic Headlamp High-Beam Medallion */}
@@ -1171,19 +1527,19 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
               ariaLabel="Toggle High-Beam Headlights [L]"
               title="Toggle High-Beam Headlights [L]"
               active={telemetry.headlightsOn}
+              keyHint="L"
               onClick={blurAndCall(onToggleHeadlights)}
             >
-              {/* Custom Headlamp Dome + Projecting Light Rays Artwork */}
               <path
-                d="M28 20 C19 20 16 25 16 32 C16 39 19 44 28 44 Z"
+                d="M28 19 C19 19 16 24 16 31 C16 38 19 43 28 43 Z"
                 fill={telemetry.headlightsOn ? '#fbbf24' : 'none'}
                 stroke="currentColor"
                 strokeWidth="2.6"
               />
-              <line x1="33" y1="22" x2="46" y2="18" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
-              <line x1="34" y1="29" x2="48" y2="29" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
-              <line x1="34" y1="35" x2="48" y2="35" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
-              <line x1="33" y1="42" x2="46" y2="46" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
+              <line x1="33" y1="21" x2="46" y2="17" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
+              <line x1="34" y1="28" x2="48" y2="28" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
+              <line x1="34" y1="34" x2="48" y2="34" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
+              <line x1="33" y1="41" x2="46" y2="45" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
             </HudMedallionButton>
 
             {/* 5. Twin Chrome Pneumatic Air-Horn Trumpet Medallion */}
@@ -1193,20 +1549,20 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
               title="Sound Indian Truck Musical Air Horn [H]"
               active={telemetry.hornActive}
               size="lg"
+              keyHint="H"
               onPointerDown={() => onSetHorn(true)}
               onPointerUp={() => onSetHorn(false)}
               onPointerLeave={() => onSetHorn(false)}
             >
-              {/* Custom Twin Chrome Air-Horn Trumpet Bell + Acoustic Waves Artwork */}
               <path
-                d="M16 29 H26 L38 20 V44 L26 35 H16 Z"
+                d="M16 28 H26 L38 19 V43 L26 34 H16 Z"
                 fill={telemetry.hornActive ? '#fbbf24' : 'none'}
                 stroke="#fbbf24"
                 strokeWidth="2.6"
                 strokeLinejoin="round"
               />
               <path
-                d="M43 24 C47 28 47 36 43 40 M47 19 C53 26 53 38 47 45"
+                d="M43 23 C47 27 47 35 43 39 M47 18 C53 25 53 37 47 44"
                 fill="none"
                 stroke={telemetry.hornActive ? '#fef08a' : 'currentColor'}
                 strokeWidth="2.6"
@@ -1243,7 +1599,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
               </div>
               <button
                 type="button"
-                onClick={onResumeGame}
+                onClick={blurAndCall(onResumeGame)}
                 className="w-9 h-9 rounded-full bg-stone-900 hover:bg-stone-800 border border-stone-700 flex items-center justify-center text-stone-300 cursor-pointer"
                 aria-label="Close Settings"
               >
@@ -1268,17 +1624,17 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
                       key={tId}
                       type="button"
                       data-testid={`modal-truck-btn-${tId}`}
-                      onClick={() => onSelectTruck(tId)}
+                      onClick={blurAndCall(() => onSelectTruck(tId))}
                       className={`p-2.5 rounded-xl text-left border transition-colors cursor-pointer ${
                         active
                           ? 'bg-amber-500/20 border-amber-400 text-stone-100'
                           : 'bg-stone-900 hover:bg-stone-800 border-stone-800 text-stone-300'
                       }`}
                     >
-                      <div className="text-xs font-bold text-amber-400 truncate">
+                      <div className="text-xs font-bold text-amber-400">
                         {spec.shortName}
                       </div>
-                      <div className="text-[10px] text-stone-400 truncate mt-0.5">
+                      <div className="text-[10px] text-stone-400 mt-0.5">
                         {spec.category}
                       </div>
                     </button>
@@ -1304,17 +1660,17 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
                       key={mId}
                       type="button"
                       data-testid={`modal-map-btn-${mId}`}
-                      onClick={() => onSelectMap(mId)}
+                      onClick={blurAndCall(() => onSelectMap(mId))}
                       className={`p-2.5 rounded-xl text-left border transition-colors cursor-pointer ${
                         active
                           ? 'bg-emerald-500/20 border-emerald-400 text-stone-100'
                           : 'bg-stone-900 hover:bg-stone-800 border-stone-800 text-stone-300'
                       }`}
                     >
-                      <div className="text-xs font-bold text-emerald-400 truncate">
+                      <div className="text-xs font-bold text-emerald-400">
                         {mSpec.shortTitle}
                       </div>
-                      <div className="text-[10px] text-stone-400 truncate mt-0.5">
+                      <div className="text-[10px] text-stone-400 mt-0.5">
                         {mSpec.regionBadge}
                       </div>
                     </button>
@@ -1323,7 +1679,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
               </div>
             </div>
 
-            {/* 3. Graphics Quality, Lighting & Audio Settings */}
+            {/* 3. Graphics Quality, Lighting, Fullscreen & Audio Settings */}
             <div className="space-y-3 py-3 border-y border-stone-800 mb-5 text-xs">
               <div>
                 <div className="flex items-center justify-between mb-1.5">
@@ -1344,7 +1700,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
                     <button
                       key={tier.id}
                       type="button"
-                      onClick={() => onToggleGraphicsQuality(tier.id)}
+                      onClick={blurAndCall(() => onToggleGraphicsQuality(tier.id))}
                       className={`py-1.5 px-2 rounded-lg font-semibold uppercase transition-colors cursor-pointer ${
                         graphicsQuality === tier.id
                           ? 'bg-amber-500 text-stone-950'
@@ -1357,7 +1713,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <div>
                   <span className="block text-stone-300 font-semibold mb-1">
                     Time of Day
@@ -1373,7 +1729,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
                       <button
                         key={tod.id}
                         type="button"
-                        onClick={() => onCycleTimeOfDay(tod.id)}
+                        onClick={blurAndCall(() => onCycleTimeOfDay(tod.id))}
                         className={`py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
                           timeOfDay === tod.id
                             ? 'bg-amber-500 text-stone-950'
@@ -1388,13 +1744,24 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
 
                 <div>
                   <span className="block text-stone-300 font-semibold mb-1">
-                    Audio & Gearbox
+                    Display, Audio & Gearbox
                   </span>
-                  <div className="grid grid-cols-2 gap-1">
+                  <div className="grid grid-cols-3 gap-1">
                     <button
                       type="button"
-                      onClick={onToggleMute}
-                      className={`py-1.5 px-2 rounded-lg font-semibold border transition-colors cursor-pointer ${
+                      onClick={blurAndCall(onToggleFullscreen)}
+                      className={`py-1.5 px-1.5 rounded-lg font-semibold border transition-colors cursor-pointer ${
+                        isFullscreen
+                          ? 'bg-amber-500/20 border-amber-400 text-amber-300'
+                          : 'bg-stone-900 border-stone-700 text-stone-300'
+                      }`}
+                    >
+                      {isFullscreen ? 'Windowed' : 'Fullscreen'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={blurAndCall(onToggleMute)}
+                      className={`py-1.5 px-1.5 rounded-lg font-semibold border transition-colors cursor-pointer ${
                         !isMuted
                           ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
                           : 'bg-stone-900 border-stone-700 text-stone-400'
@@ -1404,10 +1771,10 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
                     </button>
                     <button
                       type="button"
-                      onClick={() => onToggleTransmission()}
-                      className="py-1.5 px-2 rounded-lg font-semibold bg-stone-900 hover:bg-stone-800 border border-stone-700 text-amber-400 uppercase cursor-pointer"
+                      onClick={blurAndCall(() => onToggleTransmission())}
+                      className="py-1.5 px-1.5 rounded-lg font-semibold bg-stone-900 hover:bg-stone-800 border border-stone-700 text-amber-400 uppercase cursor-pointer"
                     >
-                      {telemetry.transmissionMode} Gear
+                      {telemetry.transmissionMode}
                     </button>
                   </div>
                 </div>
@@ -1418,7 +1785,7 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
               <button
                 type="button"
                 data-testid="resume-haul-btn"
-                onClick={onResumeGame}
+                onClick={blurAndCall(onResumeGame)}
                 className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-stone-950 font-display font-bold text-base rounded-xl transition-colors cursor-pointer"
               >
                 RESUME HAUL (ESC)
@@ -1426,14 +1793,14 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
-                  onClick={onRestartGame}
+                  onClick={blurAndCall(onRestartGame)}
                   className="py-2.5 bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-200 font-semibold text-xs rounded-xl transition-colors cursor-pointer"
                 >
                   Restart Corridor
                 </button>
                 <button
                   type="button"
-                  onClick={onReturnToTitle}
+                  onClick={blurAndCall(onReturnToTitle)}
                   className="py-2.5 bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-300 font-semibold text-xs rounded-xl transition-colors cursor-pointer"
                 >
                   Title Screen
@@ -1495,14 +1862,14 @@ export const SimulatorHUD: React.FC<SimulatorHUDProps> = ({
               <button
                 type="button"
                 data-start="true"
-                onClick={onRestartGame}
+                onClick={blurAndCall(onRestartGame)}
                 className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-stone-950 font-display font-bold text-base rounded-xl transition-colors cursor-pointer"
               >
                 {outcomeSnapshot.victory ? 'START NEXT HAUL (ENTER)' : 'TRY HAUL AGAIN (ENTER)'}
               </button>
               <button
                 type="button"
-                onClick={onReturnToTitle}
+                onClick={blurAndCall(onReturnToTitle)}
                 className="w-full py-2.5 bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-300 font-semibold text-xs rounded-xl transition-colors cursor-pointer"
               >
                 Return to Title Screen

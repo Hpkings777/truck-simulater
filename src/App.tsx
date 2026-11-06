@@ -78,6 +78,8 @@ export default function App() {
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [hudCollapsed, setHudCollapsed] = useState<boolean>(false);
   const [isTouchDevice, setIsTouchDevice] = useState<boolean>(false);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [isPortraitMobile, setIsPortraitMobile] = useState<boolean>(false);
   const [gamepadConnected, setGamepadConnected] = useState<boolean>(false);
   const [geospatialStatus, setGeospatialStatus] = useState<GeospatialStatus>(() =>
     getBakedGeospatialStatus()
@@ -109,14 +111,71 @@ export default function App() {
   const shiftDownQueuedRef = useRef<boolean>(false);
   const prevGamepadButtonsRef = useRef<boolean[]>([]);
 
-  // Orbit camera spherical coordinates for 'orbit' inspection mode
+  // Orbit camera spherical coordinates & 1st-person Cabin Freelook offsets
   const orbitAnglesRef = useRef<{ yaw: number; pitch: number; distance: number }>({
     yaw: 0.55,
     pitch: 0.28,
     distance: 13.5,
   });
+  const cabinLookRef = useRef<{ yaw: number; pitch: number }>({ yaw: 0, pitch: 0 });
   const isDraggingOrbitRef = useRef<boolean>(false);
+  const dragPointerIdRef = useRef<number | null>(null);
   const lastPointerRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const snapCameraRef = useRef<boolean>(true);
+
+  const resetPointerDrag = useCallback(() => {
+    isDraggingOrbitRef.current = false;
+    dragPointerIdRef.current = null;
+  }, []);
+
+  // Helper to request Fullscreen & Lock Landscape Orientation on mobile/tablets
+  const requestFullscreenAndLandscape = useCallback(async (forceOnDesktop = false) => {
+    const isMobileOrTablet =
+      (window.matchMedia?.('(pointer: coarse)').matches ?? false) ||
+      'ontouchstart' in window ||
+      window.innerWidth < 1024;
+
+    if (!forceOnDesktop && !isMobileOrTablet) return;
+
+    try {
+      const docEl = document.documentElement as HTMLElement & {
+        webkitRequestFullscreen?: () => Promise<void>;
+      };
+      if (!document.fullscreenElement) {
+        if (docEl.requestFullscreen) {
+          await docEl.requestFullscreen({ navigationUI: 'hide' } as FullscreenOptions);
+        } else if (docEl.webkitRequestFullscreen) {
+          await docEl.webkitRequestFullscreen();
+        }
+      }
+    } catch {
+      // Ignore if browser blocks fullscreen in iframe or non-gesture context
+    }
+
+    try {
+      const scrOrientation = screen.orientation as ScreenOrientation & {
+        lock?: (orientation: string) => Promise<void>;
+      };
+      if (scrOrientation && typeof scrOrientation.lock === 'function') {
+        await scrOrientation.lock('landscape');
+      }
+    } catch {
+      // Orientation lock is optional on desktop/iOS Safari
+    }
+  }, []);
+
+  const handleToggleFullscreen = useCallback(async () => {
+    resetPointerDrag();
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await requestFullscreenAndLandscape(true);
+      }
+    } catch {
+      // Ignore fullscreen permission errors
+    }
+  }, [requestFullscreenAndLandscape, resetPointerDrag]);
 
   // Sync document.body.dataset.state with game lifecycle state
   useEffect(() => {
@@ -140,86 +199,116 @@ export default function App() {
     };
   }, []);
 
-  // Detect touch device
+  // Detect touch device, portrait orientation & fullscreen state
   useEffect(() => {
-    const checkTouch = () => {
+    const checkViewportAndTouch = () => {
       const coarse = window.matchMedia?.('(pointer: coarse)').matches ?? false;
-      setIsTouchDevice(coarse || ('ontouchstart' in window && window.innerWidth < 1024));
+      const touchCapable = coarse || ('ontouchstart' in window && window.innerWidth < 1024);
+      setIsTouchDevice(touchCapable);
+      setIsPortraitMobile(
+        window.innerHeight > window.innerWidth && (touchCapable || window.innerWidth < 920)
+      );
+      setIsFullscreen(Boolean(document.fullscreenElement));
     };
-    checkTouch();
-    window.addEventListener('resize', checkTouch);
-    return () => window.removeEventListener('resize', checkTouch);
+    checkViewportAndTouch();
+    window.addEventListener('resize', checkViewportAndTouch);
+    window.addEventListener('orientationchange', checkViewportAndTouch);
+    document.addEventListener('fullscreenchange', checkViewportAndTouch);
+    return () => {
+      window.removeEventListener('resize', checkViewportAndTouch);
+      window.removeEventListener('orientationchange', checkViewportAndTouch);
+      document.removeEventListener('fullscreenchange', checkViewportAndTouch);
+    };
   }, []);
 
   // Select Truck Model (R7)
-  const handleSelectTruck = useCallback((truckId: TruckModelId) => {
-    selectedTruckRef.current = truckId;
-    physicsRef.current.truckModelId = truckId;
-    setSelectedTruck(truckId);
-    setTelemetry({ ...physicsRef.current });
-  }, []);
+  const handleSelectTruck = useCallback(
+    (truckId: TruckModelId) => {
+      resetPointerDrag();
+      selectedTruckRef.current = truckId;
+      physicsRef.current.truckModelId = truckId;
+      setSelectedTruck(truckId);
+      setTelemetry({ ...physicsRef.current });
+    },
+    [resetPointerDrag]
+  );
 
   // Select Indian Highway Corridor Map (R8 & R9)
-  const handleSelectMap = useCallback((mapId: MapCorridorId) => {
-    setActiveMapId(mapId);
-    selectedMapRef.current = mapId;
-    setSelectedMap(mapId);
+  const handleSelectMap = useCallback(
+    (mapId: MapCorridorId) => {
+      resetPointerDrag();
+      setActiveMapId(mapId);
+      selectedMapRef.current = mapId;
+      setSelectedMap(mapId);
 
-    // Reposition truck & traffic smoothly onto the new map's spline alignment
-    const currentS = physicsRef.current.distanceAlongHighwayM;
-    const freshTruck = createInitialTruckState(currentS, selectedTruckRef.current);
-    freshTruck.transmissionMode = physicsRef.current.transmissionMode;
-    freshTruck.headlightsOn = physicsRef.current.headlightsOn;
-    physicsRef.current = freshTruck;
-    trafficRef.current = createInitialTrafficFleet(currentS);
-    setTelemetry({ ...freshTruck });
+      // Reposition truck & traffic smoothly onto the new map's spline alignment
+      const currentS = physicsRef.current.distanceAlongHighwayM;
+      const freshTruck = createInitialTruckState(currentS, selectedTruckRef.current);
+      freshTruck.transmissionMode = physicsRef.current.transmissionMode;
+      freshTruck.headlightsOn = physicsRef.current.headlightsOn;
+      physicsRef.current = freshTruck;
+      trafficRef.current = createInitialTrafficFleet(currentS);
+      snapCameraRef.current = true;
+      setTelemetry({ ...freshTruck });
 
-    const corridorSpec = MAP_CORRIDORS[mapId];
-    setGeospatialStatus((prev) => ({
-      ...prev,
-      corridorName: `${corridorSpec.title} (${corridorSpec.subtitle})`,
-      originCoords: corridorSpec.originCoords,
-      destinationCoords: corridorSpec.destinationCoords,
-    }));
-  }, []);
+      const corridorSpec = MAP_CORRIDORS[mapId];
+      setGeospatialStatus((prev) => ({
+        ...prev,
+        corridorName: `${corridorSpec.title} (${corridorSpec.subtitle})`,
+        originCoords: corridorSpec.originCoords,
+        destinationCoords: corridorSpec.destinationCoords,
+      }));
+    },
+    [resetPointerDrag]
+  );
 
   // State transition handlers
   const handleStartGame = useCallback(() => {
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
     }
+    resetPointerDrag();
+    cabinLookRef.current = { yaw: 0, pitch: 0 };
+    snapCameraRef.current = true;
     keysHeldRef.current.clear();
     audioRef.current?.init();
+    void requestFullscreenAndLandscape(false);
     runStartTimeRef.current = performance.now();
     document.body.dataset.state = 'playing';
     gameStateRef.current = 'playing';
     setOutcomeSnapshot(null);
     setGameState('playing');
-  }, []);
+  }, [requestFullscreenAndLandscape, resetPointerDrag]);
 
   const handleResumeGame = useCallback(() => {
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
     }
+    resetPointerDrag();
     keysHeldRef.current.clear();
     audioRef.current?.init();
+    void requestFullscreenAndLandscape(false);
     document.body.dataset.state = 'playing';
     gameStateRef.current = 'playing';
     setGameState('playing');
-  }, []);
+  }, [requestFullscreenAndLandscape, resetPointerDrag]);
 
   const handlePauseGame = useCallback(() => {
+    resetPointerDrag();
     keysHeldRef.current.clear();
     audioRef.current?.pause();
     document.body.dataset.state = 'paused';
     gameStateRef.current = 'paused';
     setGameState('paused');
-  }, []);
+  }, [resetPointerDrag]);
 
   const handleRestartGame = useCallback(() => {
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
     }
+    resetPointerDrag();
+    cabinLookRef.current = { yaw: 0, pitch: 0 };
+    snapCameraRef.current = true;
     keysHeldRef.current.clear();
     const freshTruck = createInitialTruckState(60, selectedTruckRef.current);
     freshTruck.transmissionMode = physicsRef.current.transmissionMode;
@@ -233,9 +322,12 @@ export default function App() {
     document.body.dataset.state = 'playing';
     gameStateRef.current = 'playing';
     setGameState('playing');
-  }, []);
+  }, [resetPointerDrag]);
 
   const handleReturnToTitle = useCallback(() => {
+    resetPointerDrag();
+    cabinLookRef.current = { yaw: 0, pitch: 0 };
+    snapCameraRef.current = true;
     keysHeldRef.current.clear();
     audioRef.current?.pause();
     const freshTruck = createInitialTruckState(60, selectedTruckRef.current);
@@ -246,46 +338,62 @@ export default function App() {
     document.body.dataset.state = 'title';
     gameStateRef.current = 'title';
     setGameState('title');
-  }, []);
+  }, [resetPointerDrag]);
 
-  const handleCycleCamera = useCallback((explicitMode?: CameraViewMode) => {
-    const order: CameraViewMode[] = ['chase', 'cabin', 'orbit'];
-    const next =
-      explicitMode ?? order[(order.indexOf(cameraModeRef.current) + 1) % order.length];
-    cameraModeRef.current = next;
-    setCameraMode(next);
-  }, []);
+  const handleCycleCamera = useCallback(
+    (explicitMode?: CameraViewMode) => {
+      resetPointerDrag();
+      cabinLookRef.current = { yaw: 0, pitch: 0 };
+      snapCameraRef.current = true;
+      const order: CameraViewMode[] = ['chase', 'cabin', 'orbit'];
+      const next =
+        explicitMode ?? order[(order.indexOf(cameraModeRef.current) + 1) % order.length];
+      cameraModeRef.current = next;
+      setCameraMode(next);
+    },
+    [resetPointerDrag]
+  );
 
-  const handleCycleTimeOfDay = useCallback((explicitPreset?: TimeOfDayPreset) => {
-    const order: TimeOfDayPreset[] = ['golden', 'day', 'night'];
-    const next =
-      explicitPreset ?? order[(order.indexOf(timeOfDayRef.current) + 1) % order.length];
-    timeOfDayRef.current = next;
-    if (next === 'night') {
-      physicsRef.current.headlightsOn = true;
-    }
-    setTimeOfDay(next);
-    setTelemetry({ ...physicsRef.current });
-  }, []);
+  const handleCycleTimeOfDay = useCallback(
+    (explicitPreset?: TimeOfDayPreset) => {
+      resetPointerDrag();
+      const order: TimeOfDayPreset[] = ['golden', 'day', 'night'];
+      const next =
+        explicitPreset ?? order[(order.indexOf(timeOfDayRef.current) + 1) % order.length];
+      timeOfDayRef.current = next;
+      if (next === 'night') {
+        physicsRef.current.headlightsOn = true;
+      }
+      setTimeOfDay(next);
+      setTelemetry({ ...physicsRef.current });
+    },
+    [resetPointerDrag]
+  );
 
-  const handleToggleGraphicsQuality = useCallback((explicitPreset?: GraphicsQuality) => {
-    const order: GraphicsQuality[] = ['low', 'medium', 'high', 'ultra'];
-    const next =
-      explicitPreset ??
-      order[(order.indexOf(graphicsQualityRef.current) + 1) % order.length];
-    graphicsQualityRef.current = next;
-    setGraphicsQuality(next);
-  }, []);
+  const handleToggleGraphicsQuality = useCallback(
+    (explicitPreset?: GraphicsQuality) => {
+      resetPointerDrag();
+      const order: GraphicsQuality[] = ['low', 'medium', 'high', 'ultra'];
+      const next =
+        explicitPreset ??
+        order[(order.indexOf(graphicsQualityRef.current) + 1) % order.length];
+      graphicsQualityRef.current = next;
+      setGraphicsQuality(next);
+    },
+    [resetPointerDrag]
+  );
 
   const handleToggleMute = useCallback(() => {
+    resetPointerDrag();
     setIsMuted((prev) => {
       const next = !prev;
       audioRef.current?.setMuted(next);
       return next;
     });
-  }, []);
+  }, [resetPointerDrag]);
 
   const handleToggleHeadlights = useCallback(() => {
+    resetPointerDrag();
     const p = physicsRef.current;
     if (!p.headlightsOn) {
       p.headlightsOn = true;
@@ -297,36 +405,53 @@ export default function App() {
       p.highBeamOn = false;
     }
     setTelemetry({ ...p });
-  }, []);
+  }, [resetPointerDrag]);
 
-  const handleToggleIndicator = useCallback((target: IndicatorState) => {
-    const p = physicsRef.current;
-    p.indicator = p.indicator === target ? 'off' : target;
-    setTelemetry({ ...p });
-  }, []);
+  const handleToggleIndicator = useCallback(
+    (target: IndicatorState) => {
+      resetPointerDrag();
+      const p = physicsRef.current;
+      p.indicator = p.indicator === target ? 'off' : target;
+      setTelemetry({ ...p });
+    },
+    [resetPointerDrag]
+  );
 
-  const handleToggleTransmission = useCallback((explicitMode?: TransmissionMode) => {
-    const p = physicsRef.current;
-    p.transmissionMode =
-      explicitMode ?? (p.transmissionMode === 'auto' ? 'manual' : 'auto');
-    setTelemetry({ ...p });
-  }, []);
+  const handleToggleTransmission = useCallback(
+    (explicitMode?: TransmissionMode) => {
+      resetPointerDrag();
+      const p = physicsRef.current;
+      p.transmissionMode =
+        explicitMode ?? (p.transmissionMode === 'auto' ? 'manual' : 'auto');
+      setTelemetry({ ...p });
+    },
+    [resetPointerDrag]
+  );
 
-  const handleShiftGear = useCallback((delta: 1 | -1) => {
-    if (delta > 0) shiftUpQueuedRef.current = true;
-    else shiftDownQueuedRef.current = true;
-  }, []);
+  const handleShiftGear = useCallback(
+    (delta: 1 | -1) => {
+      resetPointerDrag();
+      if (delta > 0) shiftUpQueuedRef.current = true;
+      else shiftDownQueuedRef.current = true;
+    },
+    [resetPointerDrag]
+  );
 
-  const handleSetHorn = useCallback((active: boolean) => {
-    physicsRef.current.hornActive = active;
-    setTelemetry({ ...physicsRef.current });
-  }, []);
+  const handleSetHorn = useCallback(
+    (active: boolean) => {
+      resetPointerDrag();
+      physicsRef.current.hornActive = active;
+      setTelemetry({ ...physicsRef.current });
+    },
+    [resetPointerDrag]
+  );
 
   const handleTouchControl = useCallback(
     (control: 'left' | 'right' | 'throttle' | 'brake', active: boolean) => {
+      resetPointerDrag();
       touchHeldRef.current[control] = active;
     },
-    []
+    [resetPointerDrag]
   );
 
   // ============================================================================
@@ -678,12 +803,15 @@ export default function App() {
 
     syncGraphicsTier(graphicsQualityRef.current);
     const initP = physicsRef.current;
+    applyLightingPreset(timeOfDayRef.current, activeBuiltMapId, initP.z);
+    syncPlayerRigMeshes(playerRig, initP, false, isSoftwareGl);
     camera.position.set(initP.x + 7.5, initP.y + 3.1, initP.z - 8.2);
     camera.lookAt(initP.x - 0.5, initP.y + 2.0, initP.z + 2.5);
 
     if (!isSoftwareGl) {
       renderer.compile(scene, camera);
     }
+    renderer.render(scene, camera);
 
     const audio = new TruckAudioEngine();
     audioRef.current = audio;
@@ -751,27 +879,50 @@ export default function App() {
       touchHeldRef.current = { left: false, right: false, throttle: false, brake: false };
       physicsRef.current.hornActive = false;
       isDraggingOrbitRef.current = false;
+      dragPointerIdRef.current = null;
     };
 
+    const canvasEl = renderer.domElement;
+
     const onPointerDown = (e: PointerEvent) => {
-      if (cameraModeRef.current === 'orbit') {
+      // Only initiate camera drag when pressing directly on the 3D WebGL canvas (never on HUD buttons)
+      if (e.target !== canvasEl) return;
+      if (e.button !== 0 && e.pointerType === 'mouse') return;
+      if (cameraModeRef.current === 'orbit' || cameraModeRef.current === 'cabin') {
         isDraggingOrbitRef.current = true;
+        dragPointerIdRef.current = e.pointerId;
         lastPointerRef.current = { x: e.clientX, y: e.clientY };
       }
     };
+
     const onPointerMove = (e: PointerEvent) => {
-      if (!isDraggingOrbitRef.current || cameraModeRef.current !== 'orbit') return;
+      if (!isDraggingOrbitRef.current || e.pointerId !== dragPointerIdRef.current) return;
       const dx = e.clientX - lastPointerRef.current.x;
       const dy = e.clientY - lastPointerRef.current.y;
       lastPointerRef.current = { x: e.clientX, y: e.clientY };
-      orbitAnglesRef.current.yaw -= dx * 0.007;
-      orbitAnglesRef.current.pitch = Math.max(
-        0.08,
-        Math.min(1.15, orbitAnglesRef.current.pitch + dy * 0.006)
-      );
+      if (cameraModeRef.current === 'orbit') {
+        orbitAnglesRef.current.yaw -= dx * 0.007;
+        orbitAnglesRef.current.pitch = Math.max(
+          0.08,
+          Math.min(1.15, orbitAnglesRef.current.pitch + dy * 0.006)
+        );
+      } else if (cameraModeRef.current === 'cabin') {
+        cabinLookRef.current.yaw = Math.max(
+          -0.85,
+          Math.min(0.85, cabinLookRef.current.yaw + dx * 0.004)
+        );
+        cabinLookRef.current.pitch = Math.max(
+          -0.38,
+          Math.min(0.32, cabinLookRef.current.pitch - dy * 0.004)
+        );
+      }
     };
-    const onPointerUp = () => {
-      isDraggingOrbitRef.current = false;
+
+    const onPointerUp = (e: PointerEvent) => {
+      if (dragPointerIdRef.current === null || e.pointerId === dragPointerIdRef.current) {
+        isDraggingOrbitRef.current = false;
+        dragPointerIdRef.current = null;
+      }
     };
 
     const onResize = () => {
@@ -782,21 +933,27 @@ export default function App() {
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
       composer?.setSize(w, h);
+      if (composer && graphicsQualityRef.current === 'ultra') {
+        composer.render();
+      } else {
+        renderer.render(scene, camera);
+      }
     };
 
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', clearAllInputs);
-    const canvasEl = renderer.domElement;
     canvasEl.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
     window.addEventListener('resize', onResize);
 
     // 7. Paced Render & Simulation Loop (with software-WebGL fenceSync guard)
     let frameId = 0;
     let isDisposed = false;
     let frameCounter = 0;
+    let lastMirrorCamMode: CameraViewMode | null = null;
     const clock = new THREE.Clock();
     let elapsedSimTime = 0;
     let lastHudSyncTime = 0;
@@ -850,16 +1007,18 @@ export default function App() {
         scene.add(playerRig.trailerRoot);
       }
 
-      // R1: Poll Client-Side Web Gamepad API (`navigator.getGamepads()`) for Controller / Steering Wheel input
+      // R1: Poll Client-Side Web Gamepad API (`navigator.getGamepads()`) for Standard Controller / Wheel input
       let gpThrottle = 0;
       let gpBrake = 0;
       let gpSteer = 0;
       let gpAirBrake = false;
       const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-      const activePad = pads ? pads[0] || pads[1] || pads[2] || pads[3] : null;
+      const activePad = pads
+        ? Array.from(pads).find((p) => p && p.connected && p.mapping === 'standard') ?? null
+        : null;
       if (activePad) {
         const rawAxisX = activePad.axes[0] ?? 0;
-        if (Math.abs(rawAxisX) > 0.08) {
+        if (Math.abs(rawAxisX) > 0.15) {
           gpSteer = -rawAxisX; // Left stick / wheel left (<0) -> positive steer input
         }
         if (activePad.buttons[7]) gpThrottle = activePad.buttons[7].value;
@@ -1001,9 +1160,16 @@ export default function App() {
       applyLightingPreset(timeOfDayRef.current, activeBuiltMapId, pState.z);
       sunLight.target.position.set(pState.x, pState.y, pState.z - 15);
 
-      // Render Live Rear-View Wing Mirror when in 1st-Person Cabin View
+      // Render Live Rear-View Wing Mirror when in 1st-Person Cabin View (including immediately on first Cabin frame)
       const mirrorPeriod = isSoftwareGl ? 3 : activeMirrorInterval;
-      if (cameraModeRef.current === 'cabin' && frameCounter % mirrorPeriod === 1) {
+      const enteredCabinJustNow =
+        cameraModeRef.current === 'cabin' && lastMirrorCamMode !== 'cabin';
+      lastMirrorCamMode = cameraModeRef.current;
+
+      if (
+        cameraModeRef.current === 'cabin' &&
+        (enteredCabinJustNow || frameCounter % mirrorPeriod === 1)
+      ) {
         playerRig.mirrorCameraAnchor.getWorldPosition(_mirrorWorldPos);
         const backX = -Math.sin(pState.heading);
         const backZ = Math.cos(pState.heading);
@@ -1054,10 +1220,15 @@ export default function App() {
         camera.lookAt(_camLookTarget);
       } else if (cameraModeRef.current === 'cabin') {
         playerRig.cabinCameraAnchor.getWorldPosition(_cabinWorldPos);
+        // Smoothly auto-center manual freelook when actively driving without dragging
+        if (!isDraggingOrbitRef.current && pState.speedKmh > 2 && throttle > 0.1) {
+          cabinLookRef.current.yaw *= 0.94;
+          cabinLookRef.current.pitch *= 0.94;
+        }
         const fwdX = Math.sin(pState.heading);
         const fwdZ = -Math.cos(pState.heading);
-        // Immersive corner-apex head-look + subtle lateral G-force head shift
-        const lookTurnYaw = pState.heading + pState.steerAngleRad * 0.55;
+        // Pure heading + optional canvas drag freelook (never shifts automatically on button presses!)
+        const lookTurnYaw = pState.heading + cabinLookRef.current.yaw;
         const lookFwdX = Math.sin(lookTurnYaw);
         const lookFwdZ = -Math.cos(lookTurnYaw);
 
@@ -1068,15 +1239,20 @@ export default function App() {
         );
         _cabinLookPos.set(
           _cabinWorldPos.x + lookFwdX * 26 + fwdX * 2,
-          _cabinWorldPos.y - 2.15 + Math.sin(pState.pitch) * 18,
+          _cabinWorldPos.y -
+            2.38 +
+            Math.sin(pState.pitch + cabinLookRef.current.pitch) * 18,
           _cabinWorldPos.z + lookFwdZ * 26 + fwdZ * 2
         );
         camera.lookAt(_cabinLookPos);
         camera.rotation.z += -pState.roll * 0.38;
-        if (camera.fov !== 74) {
-          camera.fov = 74;
+        const baseCabinFov =
+          camera.aspect < 1 ? Math.min(98, 72 / Math.max(0.62, camera.aspect)) : 75;
+        if (Math.abs(camera.fov - baseCabinFov) > 0.25) {
+          camera.fov = baseCabinFov;
           camera.updateProjectionMatrix();
         }
+        snapCameraRef.current = false;
       } else if (cameraModeRef.current === 'orbit') {
         const { yaw, pitch, distance } = orbitAnglesRef.current;
         const worldYaw = -pState.heading + yaw;
@@ -1085,24 +1261,32 @@ export default function App() {
           pState.y + Math.sin(pitch) * distance + 1.5,
           pState.z + Math.cos(worldYaw) * Math.cos(pitch) * distance + 2.0
         );
-        camera.position.lerp(_camTargetPos, camDamp);
+        if (snapCameraRef.current) {
+          camera.position.copy(_camTargetPos);
+          snapCameraRef.current = false;
+        } else {
+          camera.position.lerp(_camTargetPos, camDamp);
+        }
         _camLookTarget.set(pState.x, pState.y + 1.9, pState.z + 1.5);
         camera.lookAt(_camLookTarget);
       } else {
         const fwdX = Math.sin(pState.heading);
         const fwdZ = -Math.cos(pState.heading);
-        const rightX = Math.cos(pState.heading);
-        const rightZ = Math.sin(pState.heading);
         const chaseDist = 17.2 + Math.min(2.8, pState.speedKmh * 0.028);
         const chaseHeight = 5.35;
-        const driverSideOffset = 1.35 - pState.steerAngleRad * 2.4;
 
+        // Centered behind the heavy rig with zero automatic lateral drift on button presses
         _camTargetPos.set(
-          pState.x - fwdX * chaseDist + rightX * driverSideOffset + shakeX,
+          pState.x - fwdX * chaseDist + shakeX,
           pState.y + chaseHeight + shakeY,
-          pState.z - fwdZ * chaseDist + rightZ * driverSideOffset
+          pState.z - fwdZ * chaseDist
         );
-        camera.position.lerp(_camTargetPos, camDamp);
+        if (snapCameraRef.current) {
+          camera.position.copy(_camTargetPos);
+          snapCameraRef.current = false;
+        } else {
+          camera.position.lerp(_camTargetPos, camDamp);
+        }
 
         _camLookTarget.set(
           pState.x + fwdX * 16,
@@ -1111,7 +1295,9 @@ export default function App() {
         );
         camera.lookAt(_camLookTarget);
 
-        const targetFov = 60 + Math.min(9.5, pState.speedKmh * 0.085);
+        const baseChaseFov =
+          camera.aspect < 1 ? Math.min(86, 60 / Math.max(0.65, camera.aspect)) : 60;
+        const targetFov = baseChaseFov + Math.min(9.5, pState.speedKmh * 0.085);
         if (Math.abs(camera.fov - targetFov) > 0.2) {
           camera.fov += (targetFov - camera.fov) * 0.1;
           camera.updateProjectionMatrix();
@@ -1151,6 +1337,7 @@ export default function App() {
       canvasEl.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
       window.removeEventListener('resize', onResize);
       dustGeo.dispose();
       dustMat.dispose();
@@ -1194,6 +1381,8 @@ export default function App() {
         isMuted={isMuted}
         hudCollapsed={hudCollapsed}
         isTouchDevice={isTouchDevice}
+        isFullscreen={isFullscreen}
+        isPortraitMobile={isPortraitMobile}
         gamepadConnected={gamepadConnected}
         geospatialStatus={geospatialStatus}
         outcomeSnapshot={outcomeSnapshot}
@@ -1208,6 +1397,7 @@ export default function App() {
         onCycleTimeOfDay={handleCycleTimeOfDay}
         onToggleGraphicsQuality={handleToggleGraphicsQuality}
         onToggleMute={handleToggleMute}
+        onToggleFullscreen={handleToggleFullscreen}
         onToggleHeadlights={handleToggleHeadlights}
         onToggleIndicator={handleToggleIndicator}
         onToggleTransmission={handleToggleTransmission}
@@ -1219,4 +1409,3 @@ export default function App() {
     </main>
   );
 }
-

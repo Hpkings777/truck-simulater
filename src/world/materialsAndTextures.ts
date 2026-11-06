@@ -604,18 +604,25 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
   crctx.lineWidth = 10;
   crctx.strokeRect(18, 20, 476, 472);
   crctx.fillStyle = '#facc15';
-  crctx.fillRect(42, 390, 160, 54);
-  crctx.fillRect(310, 390, 160, 54);
+  crctx.fillRect(36, 390, 184, 54);
+  crctx.fillRect(292, 390, 184, 54);
   crctx.fillStyle = '#dc2626';
-  crctx.fillRect(48, 396, 70, 42);
-  crctx.fillRect(384, 396, 70, 42);
-  crctx.fillStyle = '#f8fafc';
-  crctx.font = '700 22px "JetBrains Mono", monospace';
-  crctx.fillText('BFCL 449280-7', 280, 95);
+  crctx.fillRect(42, 396, 82, 42);
+  crctx.fillRect(388, 396, 82, 42);
+  crctx.textAlign = 'center';
   crctx.fillStyle = '#fbbf24';
-  crctx.font = '700 24px "Chakra Petch", sans-serif';
-  crctx.fillText('SPEED LIMIT 60 KM/H', 44, 95);
-  crctx.fillText('KEEP 15M DISTANCE', 44, 130);
+  crctx.font = '700 20px "Chakra Petch", sans-serif';
+  crctx.fillText('SPEED LIMIT 60 KM/H', 132, 92);
+  crctx.fillStyle = '#e2e8f0';
+  crctx.font = '700 17px "JetBrains Mono", monospace';
+  crctx.fillText('KEEP 15M DISTANCE', 132, 124);
+
+  crctx.fillStyle = '#f8fafc';
+  crctx.font = '700 20px "JetBrains Mono", monospace';
+  crctx.fillText('BFCL 449280-7', 380, 92);
+  crctx.fillStyle = '#94a3b8';
+  crctx.font = '700 16px "JetBrains Mono", monospace';
+  crctx.fillText('45G1 · 32,500 KG', 380, 124);
 
   const containerRearMap = new THREE.CanvasTexture(contRearCanvas);
   containerRearMap.colorSpace = THREE.SRGBColorSpace;
@@ -785,16 +792,17 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     isCabinActive = true
   ) => {
     const now = performance.now();
-    // Smart CPU optimization: redraw at ~15Hz in 1st-person cabin view, or once every 650ms in exterior views
-    const minIntervalMs = isCabinActive ? 70 : 650;
+    // Redraw at ~20Hz in 1st-person cabin view for silky-smooth diegetic gauges, or every 650ms in exterior views
+    const minIntervalMs = isCabinActive ? 50 : 650;
     if (now - lastCabinRedrawMs < minIntervalMs) return;
     lastCabinRedrawMs = now;
 
-    // --- A. Redraw High-Res 1st-Person Instrument Cluster (1024x512) ---
-    dctx.fillStyle = '#070a10';
+    // --- A. Redraw High-Res Diegetic 1st-Person Instrument Cluster (1024x512) ---
+    dctx.fillStyle = '#060a12';
     dctx.fillRect(0, 0, 1024, 512);
 
-    dctx.strokeStyle = '#1e293b';
+    // Brushed metallic outer cluster bezel with generous safe inset
+    dctx.strokeStyle = '#334155';
     dctx.lineWidth = 8;
     dctx.strokeRect(8, 8, 1008, 496);
 
@@ -807,11 +815,12 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
       maxVal: number,
       step: number,
       currentVal: number,
-      isRpm: boolean
+      isRpm: boolean,
+      digitalReadout: string
     ) => {
-      const ringGrad = dctx.createRadialGradient(cx, cy, r - 12, cx, cy, r + 8);
+      const ringGrad = dctx.createRadialGradient(cx, cy, r - 12, cx, cy, r + 6);
       ringGrad.addColorStop(0, '#0f172a');
-      ringGrad.addColorStop(0.7, '#475569');
+      ringGrad.addColorStop(0.65, '#64748b');
       ringGrad.addColorStop(1, '#1e293b');
       dctx.strokeStyle = ringGrad;
       dctx.lineWidth = 10;
@@ -819,14 +828,19 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
       dctx.arc(cx, cy, r, 0, Math.PI * 2);
       dctx.stroke();
 
-      dctx.fillStyle = '#0b111e';
+      const faceGrad = dctx.createRadialGradient(cx, cy, 12, cx, cy, r - 5);
+      faceGrad.addColorStop(0, '#111827');
+      faceGrad.addColorStop(0.8, '#090d16');
+      faceGrad.addColorStop(1, '#04060b');
+      dctx.fillStyle = faceGrad;
       dctx.beginPath();
-      dctx.arc(cx, cy, r - 6, 0, Math.PI * 2);
+      dctx.arc(cx, cy, r - 5, 0, Math.PI * 2);
       dctx.fill();
 
       if (isRpm) {
+        // Green Economy Torque Band (1050 - 1700 RPM)
         dctx.strokeStyle = '#10b981';
-        dctx.lineWidth = 14;
+        dctx.lineWidth = 13;
         dctx.beginPath();
         dctx.arc(
           cx,
@@ -837,14 +851,29 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
         );
         dctx.stroke();
 
+        // Redline Band (2050 - 2500 RPM)
         dctx.strokeStyle = '#ef4444';
         dctx.beginPath();
         dctx.arc(
           cx,
           cy,
           r - 18,
-          Math.PI * 0.75 + 0.84 * Math.PI * 1.5,
+          Math.PI * 0.75 + 0.82 * Math.PI * 1.5,
           Math.PI * 0.75 + 1.0 * Math.PI * 1.5
+        );
+        dctx.stroke();
+      } else {
+        // Speedometer posted limit warning arc above state.speedLimitKmh
+        const limFrac = Math.min(1, (state.speedLimitKmh || 80) / maxVal);
+        dctx.strokeStyle = 'rgba(239, 68, 68, 0.55)';
+        dctx.lineWidth = 11;
+        dctx.beginPath();
+        dctx.arc(
+          cx,
+          cy,
+          r - 18,
+          Math.PI * 0.75 + limFrac * Math.PI * 1.5,
+          Math.PI * 0.75 + Math.PI * 1.5
         );
         dctx.stroke();
       }
@@ -857,82 +886,133 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
         const isMajor = v % step === 0;
         const innerR = isMajor ? r - 30 : r - 20;
         dctx.strokeStyle = isMajor ? '#f8fafc' : '#64748b';
-        dctx.lineWidth = isMajor ? 4 : 2;
+        dctx.lineWidth = isMajor ? 4.0 : 2.0;
         dctx.beginPath();
         dctx.moveTo(cx + Math.cos(ang) * innerR, cy + Math.sin(ang) * innerR);
-        dctx.lineTo(cx + Math.cos(ang) * (r - 10), cy + Math.sin(ang) * (r - 10));
+        dctx.lineTo(cx + Math.cos(ang) * (r - 9), cy + Math.sin(ang) * (r - 9));
         dctx.stroke();
 
         if (isMajor) {
-          dctx.fillStyle = '#e2e8f0';
-          dctx.font = '700 24px "JetBrains Mono", monospace';
-          const tx = cx + Math.cos(ang) * (r - 54);
-          const ty = cy + Math.sin(ang) * (r - 54);
+          dctx.fillStyle = '#f8fafc';
+          dctx.font = '800 22px "JetBrains Mono", monospace';
+          const tx = cx + Math.cos(ang) * (r - 52);
+          const ty = cy + Math.sin(ang) * (r - 52);
           dctx.fillText(String(v), tx, ty);
         }
       }
 
       dctx.fillStyle = '#94a3b8';
-      dctx.font = '700 20px "Plus Jakarta Sans", sans-serif';
-      dctx.fillText(title, cx, cy + 56);
+      dctx.font = '700 15px "Plus Jakarta Sans", sans-serif';
+      dctx.fillText(title, cx, cy - 38);
       dctx.fillStyle = '#38bdf8';
-      dctx.font = '700 18px "JetBrains Mono", monospace';
-      dctx.fillText(unit, cx, cy + 84);
+      dctx.font = '700 14px "JetBrains Mono", monospace';
+      dctx.fillText(unit, cx, cy - 18);
 
+      // Sub-dial digital readout pill at bottom of analog face
+      dctx.fillStyle = '#090e17';
+      dctx.strokeStyle = '#334155';
+      dctx.lineWidth = 2.5;
+      dctx.fillRect(cx - 68, cy + 54, 136, 42);
+      dctx.strokeRect(cx - 68, cy + 54, 136, 42);
+      dctx.fillStyle = isRpm ? '#fbbf24' : '#38bdf8';
+      dctx.font = '800 22px "JetBrains Mono", monospace';
+      dctx.fillText(digitalReadout, cx, cy + 76);
+
+      // High-visibility illuminated analog needle
       const clampedFrac = Math.max(0, Math.min(1, currentVal / maxVal));
       const needleAng = Math.PI * 0.75 + clampedFrac * Math.PI * 1.5;
       dctx.save();
       dctx.translate(cx, cy);
       dctx.rotate(needleAng);
-      dctx.fillStyle = '#f97316';
+      dctx.fillStyle = isRpm ? '#f59e0b' : '#38bdf8';
       dctx.beginPath();
-      dctx.moveTo(-18, -5);
-      dctx.lineTo(r - 22, -2);
-      dctx.lineTo(r - 22, 2);
-      dctx.lineTo(-18, 5);
+      dctx.moveTo(-20, -5.5);
+      dctx.lineTo(r - 18, -2.2);
+      dctx.lineTo(r - 18, 2.2);
+      dctx.lineTo(-20, 5.5);
       dctx.closePath();
       dctx.fill();
       dctx.restore();
 
-      dctx.fillStyle = '#334155';
+      dctx.fillStyle = '#1e293b';
+      dctx.strokeStyle = isRpm ? '#f59e0b' : '#38bdf8';
+      dctx.lineWidth = 4;
       dctx.beginPath();
       dctx.arc(cx, cy, 18, 0, Math.PI * 2);
       dctx.fill();
+      dctx.stroke();
     };
 
-    drawGauge(230, 260, 182, 'TACHOMETER', 'RPM x100', 25, 5, state.rpm / 100, true);
-    drawGauge(794, 260, 182, 'SPEEDOMETER', 'KM/H', 120, 20, state.speedKmh, false);
+    drawGauge(
+      202,
+      256,
+      172,
+      'TACHOMETER',
+      'RPM x100',
+      25,
+      5,
+      state.rpm / 100,
+      true,
+      `${Math.round(state.rpm)} RPM`
+    );
+    drawGauge(
+      822,
+      256,
+      172,
+      'SPEEDOMETER',
+      'KM/H',
+      120,
+      20,
+      state.speedKmh,
+      false,
+      `${Math.round(state.speedKmh)} KMH`
+    );
 
-    // Center Multi-Function Driver Information Display (MID)
-    dctx.fillStyle = '#0f172a';
-    dctx.fillRect(434, 48, 156, 416);
-    dctx.strokeStyle = '#334155';
+    // --- Center Full-Color Diegetic Driver Information Display (DID: x=402..622, y=24..488) ---
+    dctx.fillStyle = '#09101d';
+    dctx.fillRect(402, 24, 220, 464);
+    dctx.strokeStyle = '#38bdf8';
     dctx.lineWidth = 3;
-    dctx.strokeRect(434, 48, 156, 416);
+    dctx.strokeRect(402, 24, 220, 464);
 
+    // 1. Top Turn-Signal & Beam Header Bar
     const leftOn =
       state.indicatorBlinkOn && (state.indicator === 'left' || state.indicator === 'hazard');
     const rightOn =
       state.indicatorBlinkOn && (state.indicator === 'right' || state.indicator === 'hazard');
+
     dctx.fillStyle = leftOn ? '#22c55e' : '#1e293b';
-    dctx.font = '700 34px "JetBrains Mono", monospace';
+    dctx.fillRect(412, 34, 46, 36);
+    dctx.fillStyle = leftOn ? '#052e16' : '#64748b';
+    dctx.font = '800 26px "JetBrains Mono", monospace';
     dctx.textAlign = 'center';
-    dctx.fillText('◀', 462, 82);
+    dctx.textBaseline = 'middle';
+    dctx.fillText('◀', 435, 53);
+
     dctx.fillStyle = rightOn ? '#22c55e' : '#1e293b';
-    dctx.fillText('▶', 562, 82);
+    dctx.fillRect(566, 34, 46, 36);
+    dctx.fillStyle = rightOn ? '#052e16' : '#64748b';
+    dctx.fillText('▶', 589, 53);
 
-    dctx.fillStyle = state.highBeamOn ? '#38bdf8' : state.headlightsOn ? '#4ade80' : '#334155';
-    dctx.font = '700 18px "JetBrains Mono", monospace';
+    // Center Beam & Speed Limit Roundel in Top Header
+    dctx.fillStyle = state.highBeamOn ? '#38bdf8' : state.headlightsOn ? '#4ade80' : '#64748b';
+    dctx.font = '800 13px "JetBrains Mono", monospace';
     dctx.fillText(
-      state.highBeamOn ? 'HIGH BEAM' : state.headlightsOn ? 'LOW BEAM' : 'LIGHTS OFF',
+      state.highBeamOn ? 'HI-BEAM' : state.headlightsOn ? 'LO-BEAM' : 'BEAM OFF',
       512,
-      82
+      44
     );
+    dctx.fillStyle = '#facc15';
+    dctx.font = '700 13px "JetBrains Mono", monospace';
+    dctx.fillText(`LIM ${state.speedLimitKmh || 80} KM/H`, 512, 62);
 
-    dctx.fillStyle = '#1e293b';
-    dctx.fillRect(450, 108, 124, 96);
-    dctx.fillStyle = '#f59e0b';
-    dctx.font = '700 54px "Chakra Petch", sans-serif';
+    // 2. Hero 12-Speed Gear System Box (x=414..610, y=80..186)
+    dctx.fillStyle = '#111c2d';
+    dctx.fillRect(414, 80, 196, 106);
+    dctx.strokeStyle = '#f59e0b';
+    dctx.lineWidth = 2.5;
+    dctx.strokeRect(414, 80, 196, 106);
+
     const gearLabels = [
       'R2',
       'R1',
@@ -950,52 +1030,121 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
       '6L',
       '6H',
     ];
-    const gearStr = gearLabels[state.gearIndex + 2] || 'N';
-    dctx.fillText(gearStr, 512, 160);
-    dctx.fillStyle = '#94a3b8';
-    dctx.font = '700 15px "JetBrains Mono", monospace';
-    dctx.fillText(
-      state.transmissionMode === 'auto' ? 'OPTICRUISE AUTO' : 'MANUAL SPLIT',
-      512,
-      192
+    const gearStr = state.gearLabel || gearLabels[state.gearIndex + 2] || 'N';
+    dctx.fillStyle = '#fbbf24';
+    dctx.font = '800 58px "Chakra Petch", sans-serif';
+    dctx.fillText(gearStr, 480, 126);
+
+    // Mode badge (AUTO / MAN)
+    dctx.fillStyle = state.transmissionMode === 'auto' ? '#10b981' : '#f97316';
+    dctx.fillRect(544, 92, 54, 26);
+    dctx.fillStyle = '#05080f';
+    dctx.font = '800 14px "JetBrains Mono", monospace';
+    dctx.fillText(state.transmissionMode === 'auto' ? 'AUTO' : 'MAN', 571, 106);
+
+    // Splitter / Range indicator bar (6 ranges)
+    const activeRangeIdx = Math.max(0, Math.min(5, Math.floor((state.gearIndex - 1) / 2)));
+    for (let g = 0; g < 6; g++) {
+      const gx = 424 + g * 30;
+      dctx.fillStyle =
+        state.gearIndex > 0 && g <= activeRangeIdx ? '#f59e0b' : '#1e293b';
+      dctx.fillRect(gx, 163, 25, 13);
+    }
+
+    // 3. Hero Digital Speedometer Box (y=196..278)
+    dctx.fillStyle = '#060a12';
+    dctx.fillRect(414, 196, 196, 82);
+    dctx.fillStyle = '#f8fafc';
+    dctx.font = '800 52px "Chakra Petch", sans-serif';
+    dctx.fillText(`${Math.round(state.speedKmh)}`, 512, 232);
+    dctx.fillStyle = '#38bdf8';
+    dctx.font = '700 13px "JetBrains Mono", monospace';
+    dctx.fillText('KM/H · CRUISE', 512, 265);
+
+    // 4. Live Telemetry Bars: Air PSI, Turbo Boost, Fuel & Cargo Integrity
+    const drawDidBar = (
+      y: number,
+      label: string,
+      valText: string,
+      frac: number,
+      color: string
+    ) => {
+      dctx.textAlign = 'left';
+      dctx.fillStyle = '#cbd5e1';
+      dctx.font = '700 13.5px "JetBrains Mono", monospace';
+      dctx.fillText(label, 418, y);
+      dctx.textAlign = 'right';
+      dctx.fillStyle = color;
+      dctx.fillText(valText, 606, y);
+
+      dctx.fillStyle = '#1e293b';
+      dctx.fillRect(418, y + 10, 188, 10);
+      dctx.fillStyle = color;
+      dctx.fillRect(418, y + 10, Math.max(4, Math.min(188, 188 * frac)), 10);
+    };
+
+    const airFrac = Math.min(1, state.airPressurePsi / 120);
+    drawDidBar(
+      296,
+      'AIR BRAKE',
+      `${Math.round(state.airPressurePsi)} PSI`,
+      airFrac,
+      state.airPressurePsi < 75 ? '#ef4444' : '#38bdf8'
     );
 
-    dctx.fillStyle = '#f8fafc';
-    dctx.font = '700 36px "JetBrains Mono", monospace';
-    dctx.fillText(`${Math.round(state.speedKmh)}`, 512, 248);
-    dctx.fillStyle = '#64748b';
-    dctx.font = '600 14px "Plus Jakarta Sans", sans-serif';
-    dctx.fillText('KM/H DIGITAL', 512, 274);
+    const turboBar = Math.max(0, Math.min(2.4, ((state.rpm - 750) / 1550) * 2.2));
+    drawDidBar(
+      336,
+      'TURBO',
+      `${turboBar.toFixed(1)} BAR`,
+      turboBar / 2.4,
+      '#10b981'
+    );
 
-    dctx.fillStyle = state.airPressurePsi < 75 ? '#ef4444' : '#38bdf8';
-    dctx.font = '700 20px "JetBrains Mono", monospace';
-    dctx.fillText(`AIR ${Math.round(state.airPressurePsi)} PSI`, 512, 318);
-    dctx.fillStyle = '#1e293b';
-    dctx.fillRect(452, 334, 120, 12);
-    dctx.fillStyle = state.airPressurePsi < 75 ? '#ef4444' : '#38bdf8';
-    dctx.fillRect(452, 334, Math.min(120, (state.airPressurePsi / 120) * 120), 12);
+    const fuelFrac = Math.min(1, state.fuelLiters / Math.max(1, state.fuelMaxLiters));
+    drawDidBar(
+      376,
+      'DIESEL',
+      `${Math.round(state.fuelLiters)}L`,
+      fuelFrac,
+      fuelFrac < 0.2 ? '#ef4444' : '#f59e0b'
+    );
 
-    dctx.fillStyle = '#fbbf24';
-    dctx.font = '700 18px "JetBrains Mono", monospace';
-    dctx.fillText(`FUEL ${Math.round(state.fuelLiters)}L`, 512, 378);
-    dctx.fillStyle = '#4ade80';
-    dctx.fillText(`ODO ${(state.distanceAlongHighwayM / 1000).toFixed(2)} KM`, 512, 418);
+    const cargoFrac = Math.min(1, state.cargoIntegrityPct / 100);
+    drawDidBar(
+      416,
+      'CARGO',
+      `${Math.round(state.cargoIntegrityPct)}%`,
+      cargoFrac,
+      state.cargoIntegrityPct < 80 ? '#f59e0b' : '#4ade80'
+    );
+
+    // 5. Bottom Digital Odometer & Milestone Readout (y=464, cleanly inside y=488 border)
+    dctx.textAlign = 'center';
+    dctx.fillStyle = '#fde047';
+    dctx.font = '700 14.5px "JetBrains Mono", monospace';
+    dctx.fillText(
+      `${state.landmarkKm || 'NH-44'} · ODO ${(state.distanceAlongHighwayM / 1000).toFixed(2)} KM`,
+      512,
+      464
+    );
 
     dashboardClusterMap.needsUpdate = true;
 
-    // --- B. Redraw Live Center-Console GPS Navigation Display (512x384) ---
-    gpsCtx.fillStyle = '#0b1520';
+    // --- B. Redraw Live Center-Console Highway Radar & Navigation Screen (512x384) ---
+    gpsCtx.fillStyle = '#07111a';
     gpsCtx.fillRect(0, 0, 512, 384);
 
-    gpsCtx.strokeStyle = 'rgba(56, 189, 248, 0.12)';
+    // Subtle Doppler Radar Grid & Range Rings
+    gpsCtx.strokeStyle = 'rgba(56, 189, 248, 0.14)';
     gpsCtx.lineWidth = 1;
     for (let x = 0; x < 512; x += 48) {
       gpsCtx.beginPath();
-      gpsCtx.moveTo(x, 0);
-      gpsCtx.lineTo(x, 384);
+      gpsCtx.moveTo(x, 68);
+      gpsCtx.lineTo(x, 336);
       gpsCtx.stroke();
     }
-    for (let y = 0; y < 384; y += 48) {
+    for (let y = 68; y < 336; y += 48) {
       gpsCtx.beginPath();
       gpsCtx.moveTo(0, y);
       gpsCtx.lineTo(512, y);
@@ -1005,73 +1154,117 @@ export function createHighwayTextureSet(maxAnisotropy = 8): HighwayTextureSet {
     const curS = state.distanceAlongHighwayM;
     const curSample = getRoadPointAtDistance(curS);
     const mapCenterX = 256;
-    const mapCenterY = 275;
-    const scalePxPerM = 0.85;
+    const mapCenterY = 278;
+    const scalePxPerM = 0.88;
 
-    gpsCtx.strokeStyle = '#334155';
-    gpsCtx.lineWidth = 26;
+    // Draw Curvilinear 4-Lane Highway Ribbon on Radar
+    gpsCtx.strokeStyle = '#1e293b';
+    gpsCtx.lineWidth = 42;
     gpsCtx.lineCap = 'round';
     gpsCtx.beginPath();
-    for (let ds = -120; ds <= 320; ds += 20) {
+    for (let ds = -100; ds <= 260; ds += 16) {
       const sample = getRoadPointAtDistance(Math.max(0, Math.min(HIGHWAY_LENGTH_M, curS + ds)));
       const dx = (sample.x - curSample.x) * scalePxPerM;
       const dy = -ds * scalePxPerM;
-      if (ds === -120) gpsCtx.moveTo(mapCenterX + dx, mapCenterY + dy);
+      if (ds === -100) gpsCtx.moveTo(mapCenterX + dx, mapCenterY + dy);
       else gpsCtx.lineTo(mapCenterX + dx, mapCenterY + dy);
     }
     gpsCtx.stroke();
 
+    // Center Median Emerald Line
     gpsCtx.strokeStyle = '#10b981';
-    gpsCtx.lineWidth = 6;
+    gpsCtx.lineWidth = 4;
     gpsCtx.stroke();
 
+    // Draw Nearby AI Traffic Vehicles with Archetype Sizing & Color
     for (const tv of traffic) {
       const ds = tv.s - curS;
-      if (ds > -110 && ds < 300) {
-        const tx = mapCenterX + (tv.laneOffset - state.lateralOffsetM) * 1.8;
+      if (ds > -95 && ds < 250) {
+        const tx = mapCenterX + (tv.laneOffset - state.lateralOffsetM) * 2.2;
         const ty = mapCenterY - ds * scalePxPerM;
-        gpsCtx.fillStyle = tv.direction === 1 ? '#38bdf8' : '#f59e0b';
-        gpsCtx.fillRect(tx - 4, ty - 6, 8, 12);
+        gpsCtx.fillStyle =
+          tv.archetype === 'bus'
+            ? '#38bdf8'
+            : tv.archetype === 'lorry'
+              ? '#fbbf24'
+              : '#a78bfa';
+        const vw = tv.archetype === 'bus' || tv.archetype === 'lorry' ? 11 : 8;
+        const vh = tv.archetype === 'bus' ? 20 : tv.archetype === 'lorry' ? 17 : 12;
+        gpsCtx.fillRect(tx - vw / 2, ty - vh / 2, vw, vh);
       }
     }
 
+    // Player Heavy Rig Chevron Icon
     gpsCtx.fillStyle = '#f97316';
     gpsCtx.beginPath();
-    gpsCtx.moveTo(mapCenterX, mapCenterY - 14);
-    gpsCtx.lineTo(mapCenterX + 11, mapCenterY + 10);
-    gpsCtx.lineTo(mapCenterX, mapCenterY + 4);
-    gpsCtx.lineTo(mapCenterX - 11, mapCenterY + 10);
+    gpsCtx.moveTo(mapCenterX, mapCenterY - 16);
+    gpsCtx.lineTo(mapCenterX + 12, mapCenterY + 11);
+    gpsCtx.lineTo(mapCenterX, mapCenterY + 5);
+    gpsCtx.lineTo(mapCenterX - 12, mapCenterY + 11);
     gpsCtx.closePath();
     gpsCtx.fill();
 
+    // Top NHAI Green Corridor Header Bar (Dynamic across NH-44, NH-48 & NH-66!)
     gpsCtx.fillStyle = '#065f46';
     gpsCtx.fillRect(0, 0, 512, 68);
     gpsCtx.fillStyle = '#facc15';
-    gpsCtx.fillRect(14, 12, 68, 44);
+    gpsCtx.fillRect(12, 10, 82, 48);
     gpsCtx.fillStyle = '#18181b';
     gpsCtx.textAlign = 'center';
-    gpsCtx.font = '700 22px "Chakra Petch", sans-serif';
-    gpsCtx.fillText('NH-44', 48, 42);
-
-    const nextStop =
-      curS < 1350
-        ? { name: 'SHAHBAD FLYOVER', distM: 1350 - curS }
-        : curS < 2450
-          ? { name: 'SHER-E-PUNJAB DHABA', distM: 2450 - curS }
-          : curS < 3450
-            ? { name: 'PIPLI INTERCHANGE', distM: 3450 - curS }
-            : { name: 'KARNAL FASTAG TOLL', distM: Math.max(0, 4350 - curS) };
+    gpsCtx.textBaseline = 'middle';
+    gpsCtx.font = '800 22px "Chakra Petch", sans-serif';
+    const routeCode = (state.landmarkKm || 'NH-44').split(' ')[0] || 'NH-44';
+    gpsCtx.fillText(routeCode, 53, 35);
 
     gpsCtx.textAlign = 'left';
     gpsCtx.fillStyle = '#ffffff';
-    gpsCtx.font = '700 22px "Plus Jakarta Sans", sans-serif';
-    gpsCtx.fillText(nextStop.name, 98, 32);
+    gpsCtx.font = '800 20px "Plus Jakarta Sans", sans-serif';
+    const wpName = (state.nextWaypointName || 'HIGHWAY WAYPOINT').toUpperCase();
+    gpsCtx.fillText(wpName.slice(0, 22), 108, 25);
+
     gpsCtx.fillStyle = '#a7f3d0';
-    gpsCtx.font = '700 18px "JetBrains Mono", monospace';
+    gpsCtx.font = '700 16px "JetBrains Mono", monospace';
+    const wpDistKm = ((state.nextWaypointDistanceM || 500) / 1000).toFixed(2);
+    const remKm = Math.max(0, (4350 - curS) / 1000).toFixed(2);
+    gpsCtx.fillText(`NEXT: ${wpDistKm} KM · GOAL: ${remKm} KM`, 108, 49);
+
+    // Circular Speed Limit Sign on Top-Right of Infotainment Screen
+    gpsCtx.fillStyle = '#f8fafc';
+    gpsCtx.beginPath();
+    gpsCtx.arc(472, 34, 24, 0, Math.PI * 2);
+    gpsCtx.fill();
+    gpsCtx.strokeStyle = '#dc2626';
+    gpsCtx.lineWidth = 6;
+    gpsCtx.stroke();
+    gpsCtx.fillStyle = '#090d16';
+    gpsCtx.textAlign = 'center';
+    gpsCtx.font = '800 20px "JetBrains Mono", monospace';
+    gpsCtx.fillText(`${state.speedLimitKmh || 80}`, 472, 35);
+
+    // Bottom Telemetry Footer Bar on Center Console Screen
+    gpsCtx.fillStyle = '#0f172a';
+    gpsCtx.fillRect(0, 336, 512, 48);
+    gpsCtx.strokeStyle = '#334155';
+    gpsCtx.lineWidth = 2;
+    gpsCtx.beginPath();
+    gpsCtx.moveTo(0, 336);
+    gpsCtx.lineTo(512, 336);
+    gpsCtx.stroke();
+
+    gpsCtx.textAlign = 'left';
+    gpsCtx.fillStyle = '#38bdf8';
+    gpsCtx.font = '700 15px "JetBrains Mono", monospace';
     gpsCtx.fillText(
-      `IN ${(nextStop.distM / 1000).toFixed(2)} KM  ·  REMAINING ${Math.max(0, (4350 - curS) / 1000).toFixed(2)} KM`,
-      98,
-      56
+      `ZONE: ${(state.zoneName || 'HIGHWAY CORRIDOR').toUpperCase().slice(0, 24)}`,
+      14,
+      361
+    );
+    gpsCtx.textAlign = 'right';
+    gpsCtx.fillStyle = '#fbbf24';
+    gpsCtx.fillText(
+      `GEAR ${gearStr} (${state.transmissionMode.toUpperCase()})`,
+      498,
+      361
     );
 
     gpsNavMap.needsUpdate = true;
